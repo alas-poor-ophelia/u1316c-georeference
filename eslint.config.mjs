@@ -51,6 +51,18 @@ export default tseslint.config(
 		},
 	},
 	{
+		// src/persist holds the same property for a harder case: it is ABOUT the vault, and still
+		// never imports it. Everything it needs is behind VaultPort, which the plugin layer
+		// implements and the tests fake — so rename behaviour is testable without an app.
+		files: ["src/persist/**/*.ts"],
+		rules: {
+			"no-restricted-imports": [
+				"error",
+				{ patterns: [{ group: ["obsidian", "../plugin/*", "../plugin/**"], message: "src/persist reaches the vault only through VaultPort." }] },
+			],
+		},
+	},
+	{
 		// Scripts and tests are Bun programs: console output and node: imports are the job.
 		files: ["test/**/*.ts", "scripts/**/*.ts"],
 		rules: {
