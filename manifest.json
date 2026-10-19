@@ -1,0 +1,9 @@
+{
+  "id": "geb",
+  "name": "U+1316C Georeference",
+  "version": "0.0.1",
+  "minAppVersion": "1.13.0",
+  "description": "Georeference a map image: pin notes by latitude and longitude. A coordinate system over your picture, not a basemap.",
+  "author": "alas, poor ophelia",
+  "isDesktopOnly": false
+}

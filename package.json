@@ -1,0 +1,28 @@
+{
+  "name": "geb",
+  "version": "0.0.1",
+  "description": "Georeference a map image in Obsidian: pin notes by latitude and longitude",
+  "private": true,
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "dev": "bun run esbuild.config.mjs",
+    "build": "tsc --noEmit -p tsconfig.json && bun run esbuild.config.mjs production",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint . --max-warnings 0",
+    "lint:scanner": "eslint --config eslint.scanner-replica.mjs src scripts test --max-warnings 0",
+    "gate:scanner": "bun run scripts/gate-scanner.ts"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "@typescript-eslint/parser": "8.71.2",
+    "esbuild": "0.28.2",
+    "eslint": "9.39.5",
+    "eslint-plugin-obsidianmd": "0.4.1",
+    "obsidian": "1.14.4",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.2"
+  }
+}

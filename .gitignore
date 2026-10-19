@@ -1,0 +1,13 @@
+node_modules/
+main.js
+*.map
+*.log
+.DS_Store
+
+# Maintainer-facing planning notes stay local; they do not ship in the public repo.
+SCOPE.md
+
+# Scanner-gate scratch: the deliberate violations the phase-0 gate plants and removes. The gate
+# clears up after itself, but an interrupted run must not be able to strand deliberate violations
+# in the tracked tree — that is exactly what the store scan reads.
+src/__gate/
