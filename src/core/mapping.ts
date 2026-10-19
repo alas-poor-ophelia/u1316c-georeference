@@ -8,19 +8,15 @@
  *
  * CONDITIONING. Raw inputs are badly scaled for a least-squares fit: longitude runs to 180 while
  * pixels run to several thousand, and an order-2 polynomial squares both. Every fitter normalises
- * each side to zero centroid and unit RMS radius first (Hartley normalisation), fits in that
- * space, and undoes it on apply. Without this an order-2 fit over a continent-sized map loses
- * most of its significant digits in the normal equations.
+ * each side to zero centroid and an RMS radius of sqrt(2) first (Hartley normalisation), fits in
+ * that space, and undoes it on apply. Without this an order-2 fit over a continent-sized map
+ * loses most of its significant digits in the normal equations.
  */
+import { FitError, InvalidInputError } from "./errors";
 import { leastSquares, solve } from "./linalg";
 import { MIN_POINTS, type Mapping, type TransformKind, type TransformOptions } from "./types";
 
-export class FitError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "FitError";
-	}
-}
+export { FitError } from "./errors";
 
 interface Norm {
 	readonly cx: number;
@@ -59,6 +55,12 @@ function checkInputs(src: Float64Array, dst: Float64Array, kind: TransformKind):
 	const n = src.length / 2;
 	const need = MIN_POINTS[kind];
 	if (n < need) throw new FitError(`${kind} needs at least ${need} control points, got ${n}`);
+	// A non-finite coordinate does not merely give a wrong answer, it corrupts the sort comparator
+	// in the hull routine: an eight-point set with one NaN produced an ELEVEN-vertex hull.
+	for (let i = 0; i < src.length; i++) {
+		if (!Number.isFinite(src[i]!)) throw new InvalidInputError(`source coordinate ${i} is not finite`);
+		if (!Number.isFinite(dst[i]!)) throw new InvalidInputError(`destination coordinate ${i} is not finite`);
+	}
 	return n;
 }
 
@@ -143,6 +145,12 @@ export class TpsMapping implements Mapping {
 		readonly nodes: Float64Array,
 		/** Spline weights then the affine tail, per output axis: [w_0..w_{n-1}, a0, a1, a2]. */
 		readonly coeffs: readonly (readonly number[])[],
+		/**
+		 * Normalised destination values the fit was built from, per control point. Kept because
+		 * the leave-one-out oracle must re-solve the SAME problem with one row removed, and at
+		 * lambda > 0 these cannot be recovered by evaluating the fit (it no longer interpolates).
+		 */
+		readonly targets: readonly (readonly number[])[],
 		/** Inverse of the (n+3) x (n+3) system matrix. Rippa's formula needs its diagonal. */
 		readonly systemInverse: readonly (readonly number[])[],
 		readonly lambda: number,
@@ -175,7 +183,27 @@ export class TpsMapping implements Mapping {
 	}
 }
 
+/**
+ * Scale the smoothing term so a given `lambda` means roughly the same thing whatever the control
+ * point count. Measured: the diagonal set to `lambda` alone gave a 13.9x spread in mean
+ * control-point residual across n = 8 to 128, because the kernel rows it competes with sum over n
+ * terms. Dividing by n brings that to 3.3x, and the remainder is non-monotonic across n, so most
+ * of what is left is fixture sampling rather than a systematic trend.
+ *
+ * NOT fully portable even so, and the frontmatter stores it as if it were. The forward and
+ * reverse fits apply the same lambda in their own normalised destination spaces, so at lambda = 1
+ * the round trip at control points drifts by up to 1.6 pixels where lambda = 0 gives exactly 0.
+ * That eats validity tolerance. lambda defaults to 0 and nothing in v1 exposes it; before it
+ * reaches a UI it needs either a shared scale across the two directions or a documented ceiling.
+ */
+function smoothingDiagonal(lambda: number, n: number): number {
+	return lambda / n;
+}
+
 function fitTps(src: Float64Array, dst: Float64Array, lambda: number): TpsMapping {
+	if (!Number.isFinite(lambda) || lambda < 0) {
+		throw new InvalidInputError(`lambda must be a finite number >= 0, got ${lambda}`);
+	}
 	const n = checkInputs(src, dst, "tps");
 	const srcN = normalisation(src);
 	const dstN = normalisation(dst);
@@ -193,11 +221,12 @@ function fitTps(src: Float64Array, dst: Float64Array, lambda: number): TpsMappin
 	// [ K  P ] [ w ]   [ v ]
 	// [ Pᵀ 0 ] [ a ] = [ 0 ]
 	const size = n + 3;
+	const diag = smoothingDiagonal(lambda, n);
 	const A: number[][] = Array.from({ length: size }, () => new Array<number>(size).fill(0));
 	for (let i = 0; i < n; i++) {
 		for (let j = 0; j < n; j++) {
 			if (i === j) {
-				A[i]![j] = lambda;
+				A[i]![j] = diag;
 				continue;
 			}
 			const dx = nodes[2 * i]! - nodes[2 * j]!;
@@ -245,10 +274,16 @@ function fitTps(src: Float64Array, dst: Float64Array, lambda: number): TpsMappin
 		return [ex, ey];
 	};
 
-	return new TpsMapping(n, nodes, coeffs, Ainv, lambda, srcN, dstN, makeApply(srcN, dstN, evaluate));
+	return new TpsMapping(n, nodes, coeffs, target, Ainv, lambda, srcN, dstN, makeApply(srcN, dstN, evaluate));
 }
 
-/** Fit a mapping from interleaved source pairs to interleaved destination pairs. */
+/**
+ * Fit a mapping from interleaved source pairs to interleaved destination pairs.
+ *
+ * The default branch is not dead code. TypeScript guarantees nothing about a `kind` that arrived
+ * from note frontmatter, and without it an unrecognised model returned a Fit whose `forward` and
+ * `reverse` were both `undefined` — a shape that only fails much later, somewhere unrelated.
+ */
 export function fitMapping(src: Float64Array, dst: Float64Array, opts: TransformOptions): Mapping {
 	switch (opts.kind) {
 		case "affine":
@@ -256,5 +291,17 @@ export function fitMapping(src: Float64Array, dst: Float64Array, opts: Transform
 			return fitPolynomial(src, dst, opts.kind);
 		case "tps":
 			return fitTps(src, dst, opts.lambda ?? 0);
+		default: {
+			const bad: never = opts.kind;
+			throw new InvalidInputError(`unknown transform model: ${JSON.stringify(bad)}`);
+		}
 	}
 }
+
+/**
+ * The thin-plate kernel and the smoothing scale, exposed for the independent leave-one-out oracle
+ * in residuals.ts. That oracle must NOT call back into `fitTps`, because re-fitting a subset
+ * would re-normalise it and so solve a different problem — which is exactly the bug that made the
+ * previous oracle disagree with the closed form by 1 to 3 percent whenever lambda was non-zero.
+ */
+export const INTERNAL_FOR_ORACLE = { tpsKernel, smoothingDiagonal } as const;

@@ -5,12 +5,28 @@
  * in an Obsidian plugin is a dependency the community-store scan walks.
  */
 
-/** Thrown when a system has no unique solution — collinear control points, usually. */
-export class SingularMatrixError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "SingularMatrixError";
-	}
+import { SingularMatrixError } from "./errors";
+
+/**
+ * Relative threshold below which a pivot counts as zero.
+ *
+ * Testing `pivot === 0` was a real defect, not a nicety. Four collinear control points produced
+ * a system whose pivot was tiny but not exactly zero, so the solve "succeeded" and returned
+ * garbage: a probe mapped to x=54.98 under affine and x=51.01 under the spline — two wrong
+ * answers that disagreed with each other. Nothing downstream caught it, because the garbage
+ * forward and reverse fits were consistent WITH EACH OTHER, which is precisely the case the
+ * round-trip validity test cannot see. The behaviour was also erratic: nudging a point by 1e-9
+ * threw, by 1e-12 did not.
+ *
+ * Scaled against the largest magnitude in the matrix, so it means the same thing whatever the
+ * coordinates happen to be.
+ */
+export const RELATIVE_PIVOT_EPSILON = 1e-10;
+
+function maxMagnitude(a: readonly (readonly number[])[]): number {
+	let m = 0;
+	for (const row of a) for (const v of row) m = Math.max(m, Math.abs(v));
+	return m;
 }
 
 /**
@@ -32,6 +48,12 @@ export function solve(a: readonly (readonly number[])[], b: readonly (readonly n
 	});
 	const B: number[][] = b.map((row) => [...row]);
 
+	// Scaled once against the original matrix, so the threshold does not drift as elimination
+	// shrinks the remaining submatrix.
+	const scale = maxMagnitude(A);
+	if (scale === 0) throw new SingularMatrixError("matrix is all zeros");
+	const tol = RELATIVE_PIVOT_EPSILON * scale;
+
 	for (let col = 0; col < n; col++) {
 		// Partial pivot: the largest magnitude in this column at or below the diagonal.
 		let pivot = col;
@@ -43,7 +65,12 @@ export function solve(a: readonly (readonly number[])[], b: readonly (readonly n
 				pivot = r;
 			}
 		}
-		if (best === 0) throw new SingularMatrixError(`singular at column ${col}`);
+		if (best <= tol) {
+			throw new SingularMatrixError(
+				`singular at column ${col}: largest remaining pivot ${best.toExponential(3)} is at or below ${tol.toExponential(3)} ` +
+					`(${RELATIVE_PIVOT_EPSILON} of the matrix magnitude). The control points are collinear or coincident.`,
+			);
+		}
 		if (pivot !== col) {
 			const ta = A[col]!;
 			A[col] = A[pivot]!;

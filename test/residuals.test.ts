@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { fitMapping, type TpsMapping } from "../src/core/mapping";
-import { affineResiduals, diagnose, tpsLooBruteForce, tpsLooRippa } from "../src/core/residuals";
+import { affineResiduals, diagnose, tpsLooIndependent, tpsLooRippa } from "../src/core/residuals";
 import { CLEAN, TYPO, TYPO_INDEX } from "./fixtures";
 
 const worst = (rs: readonly { index: number; error: number }[]): number =>
 	rs.reduce((a, b) => (b.error > a.error ? b : a)).index;
+
+const world = new Float64Array(CLEAN.flatMap((p) => [p.lat, p.lng]));
+const pixel = new Float64Array(CLEAN.flatMap((p) => [p.px, p.py]));
+const fitTps = (lambda: number): TpsMapping =>
+	fitMapping(world, pixel, { kind: "tps", lambda }) as TpsMapping;
 
 describe("the trust display catches a mistyped coordinate", () => {
 	test("affine residuals rank the corrupted point worst", () => {
@@ -24,8 +29,7 @@ describe("the trust display catches a mistyped coordinate", () => {
 	});
 
 	test("the signal a user can act on is the global rise, not one number", () => {
-		// Clean fixture: max about 27px. One sign-flipped longitude: max about 276px. The whole
-		// fit degrades, which is the thing worth putting in front of someone.
+		// Clean fixture: max about 27px. One sign-flipped longitude: max about 276px.
 		const clean = Math.max(...affineResiduals(CLEAN).map((r) => r.error));
 		const typo = Math.max(...affineResiduals(TYPO).map((r) => r.error));
 		expect(typo / clean).toBeGreaterThan(5);
@@ -35,55 +39,71 @@ describe("the trust display catches a mistyped coordinate", () => {
 		expect(diagnose(TYPO, { kind: "affine" }).notes.some((n) => n.includes("masking"))).toBe(true);
 		expect(diagnose(CLEAN, { kind: "affine" }).notes.some((n) => n.includes("masking"))).toBe(false);
 	});
+});
 
-	test("a clean set produces no comparable outlier", () => {
-		const errs = affineResiduals(CLEAN).map((r) => r.error);
-		expect(Math.max(...errs)).toBeLessThan(3 * (errs.reduce((a, b) => a + b, 0) / errs.length));
+describe("why affine is the primary display and not the spline's own residuals", () => {
+	test("the spline's ordinary residuals are zero by construction; affine's are not", () => {
+		// THIS is the reason, and it is the whole reason. An earlier version of this suite tried
+		// to assert that the affine display avoids the hull-extrapolation artefact. Measured, that
+		// claim is false: on the clean fixture the worst affine residual and the worst
+		// leave-one-out error are the SAME point (Aberdeen, the northernmost, where the warp is
+		// largest), so affine ranks a hull corner worst for an entirely legitimate reason.
+		//
+		// What actually distinguishes them is that an interpolating spline reports a flawless fit
+		// on any input whatsoever, while a least-squares fit cannot absorb a bad point.
+		const out = new Float64Array(pixel.length);
+		fitTps(0).apply(world, out);
+		const splineWorst = Math.max(...CLEAN.map((p, i) => Math.hypot(out[2 * i]! - p.px, out[2 * i + 1]! - p.py)));
+		const affineWorst = Math.max(...affineResiduals(CLEAN).map((r) => r.error));
+
+		expect(splineWorst).toBeLessThan(1e-3);
+		expect(affineWorst).toBeGreaterThan(10);
 	});
 });
 
-describe("Rippa's closed form against an independent refit", () => {
-	test("agrees with brute-force leave-one-out on clean points", () => {
-		const m = fitMapping(
-			new Float64Array(CLEAN.flatMap((p) => [p.lat, p.lng])),
-			new Float64Array(CLEAN.flatMap((p) => [p.px, p.py])),
-			{ kind: "tps" },
-		) as TpsMapping;
-		const closed = tpsLooRippa(m);
-		const brute = tpsLooBruteForce(CLEAN);
-		expect(closed.length).toBe(brute.length);
-		closed.forEach((c, i) => {
-			const b = brute[i]!;
-			// Relative agreement: these errors span orders of magnitude across hull and interior.
-			expect(Math.abs(c - b) / Math.max(b, 1e-6)).toBeLessThan(1e-6);
+describe("Rippa's closed form against an independent re-solve", () => {
+	// The oracle no longer goes through the public fitter. That was a defect in the ORACLE: a
+	// re-fitted subset gets re-normalised, so it solves a different problem. At lambda = 0 the
+	// spline interpolates either way and the discrepancy hid; at lambda > 0 the two disagreed by
+	// 1 to 3 percent — and diagnose() runs with lambda > 0 in production.
+	for (const lambda of [0, 0.01, 0.5, 2]) {
+		test(`agrees at lambda = ${lambda}`, () => {
+			const m = fitTps(lambda);
+			const closed = tpsLooRippa(m);
+			const oracle = tpsLooIndependent(m);
+			expect(closed.length).toBe(oracle.length);
+			closed.forEach((c, i) => {
+				const o = oracle[i]!;
+				expect(Math.abs(c - o) / Math.max(o, 1e-9)).toBeLessThan(1e-6);
+			});
 		});
-	});
+	}
 });
 
-describe("the leave-one-out caveat is real and is marked", () => {
-	test("on clean points the worst leave-one-out error sits on the hull", () => {
+describe("the leave-one-out caveat is real, measured, and marked", () => {
+	test("hull points carry systematically larger errors than interior points", () => {
+		// The artefact itself, quantified rather than asserted: leaving a hull point out means
+		// extrapolating to it. Measured on the clean fixture, hull mean is roughly twice interior.
 		const d = diagnose(CLEAN, { kind: "tps" });
-		expect(d.loo).toBeDefined();
-		const w = d.loo!.reduce((a, b) => (b.error > a.error ? b : a));
-		// This is the trap: a perfectly correct corner is the worst offender by this metric,
-		// because leaving it out means extrapolating to it.
-		expect(w.onHull).toBe(true);
+		const mean = (xs: readonly number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length;
+		const hull = mean(d.loo!.filter((r) => r.onHull).map((r) => r.error));
+		const interior = mean(d.loo!.filter((r) => !r.onHull).map((r) => r.error));
+		expect(hull).toBeGreaterThan(1.5 * interior);
 	});
 
-	test("so the caveat reaches the caller rather than sitting in a changelog", () => {
+	test("so the headline number excludes them", () => {
+		const d = diagnose(CLEAN, { kind: "tps" });
+		const interior = d.loo!.filter((r) => !r.onHull).map((r) => r.error);
+		const all = d.loo!.map((r) => r.error);
+		const rms = (xs: readonly number[]): number => Math.sqrt(xs.reduce((a, b) => a + b * b, 0) / xs.length);
+		expect(d.looRms).toBeCloseTo(rms(interior), 6);
+		expect(d.looRms).not.toBeCloseTo(rms(all), 2);
+	});
+
+	test("and the caveats reach the caller rather than sitting in a changelog", () => {
 		const d = diagnose(CLEAN, { kind: "tps" });
 		expect(d.notes.some((n) => n.includes("hull"))).toBe(true);
 		expect(d.notes.some((n) => n.includes("neighbours"))).toBe(true);
-	});
-
-	test("and the affine display does NOT single that corner out", () => {
-		const d = diagnose(CLEAN, { kind: "tps" });
-		const looWorst = d.loo!.reduce((a, b) => (b.error > a.error ? b : a)).index;
-		const affineWorst = worst(d.affine);
-		// The whole reason affine is the primary display: it does not inherit this artefact.
-		const affineAtLooWorst = d.affine[looWorst]!.error;
-		const affineMax = d.affine[affineWorst]!.error;
-		expect(affineAtLooWorst).toBeLessThanOrEqual(affineMax);
 	});
 });
 
@@ -94,8 +114,11 @@ describe("leave-one-out availability", () => {
 		expect(d.notes.some((n) => n.includes("exactly affine"))).toBe(true);
 	});
 
-	test("four points is enough", () => {
-		expect(diagnose(CLEAN.slice(0, 4), { kind: "tps" }).loo).toBeDefined();
+	test("four points has every point on the hull, so there is no headline number", () => {
+		const d = diagnose(CLEAN.slice(0, 4), { kind: "tps" });
+		expect(d.loo).toBeDefined();
+		expect(d.looRms).toBeUndefined();
+		expect(d.notes.some((n) => n.includes("Every control point is on the hull"))).toBe(true);
 	});
 
 	test("an affine fit reports no leave-one-out at all", () => {

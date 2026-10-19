@@ -11,3 +11,7 @@ SCOPE.md
 # clears up after itself, but an interrupted run must not be able to strand deliberate violations
 # in the tracked tree — that is exactly what the store scan reads.
 src/__gate/
+
+# Throwaway measurement scripts. Guarded so an interrupted session cannot strand one in the
+# tracked tree, which the store scan reads.
+scripts/_scratch-*.ts

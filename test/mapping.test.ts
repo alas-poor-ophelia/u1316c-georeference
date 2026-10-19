@@ -95,7 +95,7 @@ describe("fit, both directions", () => {
 		const probe = { lat: 53.0, lng: -2.0 };
 		const px = toPixel(fit, probe.lat, probe.lng, IMAGE);
 		expect(px).not.toBeNull();
-		const back = toLatLng(fit, px!.x, px!.y);
+		const back = toLatLng(fit, px!.x, px!.y, IMAGE);
 		expect(back).not.toBeNull();
 		expect(back!.lat).toBeCloseTo(probe.lat, 2);
 		expect(back!.lng).toBeCloseTo(probe.lng, 2);

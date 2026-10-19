@@ -9,11 +9,12 @@
  * sheet with an inset needs two unrelated transforms over two pixel areas. v1 fills the list with
  * exactly one entry whose bounds are the whole image.
  */
-import { convexHull, inHull } from "./hull";
+import { InvalidInputError } from "./errors";
+import { convexHull, inHull, type Vec2 } from "./hull";
 import { fitMapping } from "./mapping";
 import { diagnose, type Diagnostics } from "./residuals";
-import type { ControlPoint, LatLng, Mapping, TransformKind, TransformOptions } from "./types";
-import { roundTrip, roundTripTolerance } from "./validity";
+import { MIN_POINTS, type ControlPoint, type LatLng, type Mapping, type TransformKind, type TransformOptions } from "./types";
+import { roundTrip, roundTripFromPixel, roundTripTolerance } from "./validity";
 
 export interface ImageSize {
 	readonly width: number;
@@ -37,6 +38,12 @@ export interface Fit {
 	readonly reverse: Mapping;
 	/** Convex hull of the control points, in world space. Inside it the fit interpolates. */
 	readonly hull: readonly LatLng[];
+	/**
+	 * The same hull as {x: lng, y: lat}, precomputed. `toPixel` and `toLatLng` run once per pin
+	 * per render and once per mouse-move for a hover readout, and they previously rebuilt this
+	 * array on every call.
+	 */
+	readonly hullXY: readonly Vec2[];
 	readonly bounds: PixelBounds | null;
 	readonly diagnostics: Diagnostics;
 }
@@ -56,11 +63,30 @@ export interface WorldResult {
 	readonly extrapolated: boolean;
 }
 
+/**
+ * Validate at the boundary, naming the offending control point.
+ *
+ * The fitters reject non-finite coordinates too, but they only know array indices. A user who
+ * mistyped a latitude wants to be told which place it was, not "source coordinate 11".
+ */
+function validate(points: readonly ControlPoint[], opts: TransformOptions): void {
+	if (!(opts.kind in MIN_POINTS)) {
+		throw new InvalidInputError(`unknown transform model: ${JSON.stringify(opts.kind)}`);
+	}
+	points.forEach((p, i) => {
+		const where = p.label === undefined ? `control point ${i}` : `control point ${i} (${p.label})`;
+		for (const [name, v] of [["px", p.px], ["py", p.py], ["lat", p.lat], ["lng", p.lng]] as const) {
+			if (!Number.isFinite(v)) throw new InvalidInputError(`${where} has a non-finite ${name}: ${v}`);
+		}
+	});
+}
+
 export function buildFit(
 	points: readonly ControlPoint[],
 	opts: TransformOptions,
 	bounds: PixelBounds | null = null,
 ): Fit {
+	validate(points, opts);
 	const world = new Float64Array(points.length * 2);
 	const pixel = new Float64Array(points.length * 2);
 	points.forEach((p, i) => {
@@ -70,18 +96,18 @@ export function buildFit(
 		pixel[2 * i + 1] = p.py;
 	});
 
+	const hullXY = convexHull(points.map((p) => ({ x: p.lng, y: p.lat })));
 	return {
 		kind: opts.kind,
 		points: [...points],
 		forward: fitMapping(world, pixel, opts),
 		reverse: fitMapping(pixel, world, opts),
-		hull: convexHull(points.map((p) => ({ x: p.lng, y: p.lat }))).map((v) => ({ lat: v.y, lng: v.x })),
+		hull: hullXY.map((v) => ({ lat: v.y, lng: v.x })),
+		hullXY,
 		bounds,
 		diagnostics: diagnose(points, opts),
 	};
 }
-
-const hullVerts = (fit: Fit): { x: number; y: number }[] => fit.hull.map((h) => ({ x: h.lng, y: h.lat }));
 
 function withinBounds(fit: Fit, size: ImageSize, x: number, y: number): boolean {
 	const b = fit.bounds;
@@ -113,19 +139,34 @@ export function toPixel(
 		x,
 		y,
 		inBounds: withinBounds(fit, size, x, y),
-		extrapolated: !inHull(hullVerts(fit), { x: lng, y: lat }),
+		extrapolated: !inHull(fit.hullXY, { x: lng, y: lat }),
 	};
 }
 
-/** Pixel to world. The inverse direction needs no round-trip gate: the query already has a pixel. */
-export function toLatLng(fit: Fit, x: number, y: number): WorldResult | null {
+/**
+ * Pixel to world, gated the same way.
+ *
+ * An earlier version of this skipped the gate on the reasoning that the query already holds a
+ * pixel. That was wrong twice: a pixel outside the image extrapolates exactly as a far-field
+ * coordinate does, and a near-singular fit returns confident finite garbage for a pixel that is
+ * perfectly in bounds. From this direction the test needs only two evaluations.
+ */
+export function toLatLng(
+	fit: Fit,
+	x: number,
+	y: number,
+	size: ImageSize,
+	tolerancePx: number = roundTripTolerance(size),
+): WorldResult | null {
+	if (!roundTripFromPixel(fit.forward, fit.reverse, x, y, tolerancePx).ok) return null;
+
 	const src = new Float64Array([x, y]);
 	const dst = new Float64Array(2);
 	fit.reverse.apply(src, dst);
 	const lat = dst[0]!;
 	const lng = dst[1]!;
 	if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-	return { lat, lng, extrapolated: !inHull(hullVerts(fit), { x: lng, y: lat }) };
+	return { lat, lng, extrapolated: !inHull(fit.hullXY, { x: lng, y: lat }) };
 }
 
 /**

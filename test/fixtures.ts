@@ -72,3 +72,41 @@ export const TYPO_INDEX = 1;
 export const TYPO: readonly ControlPoint[] = CLEAN.map((p, i) =>
 	i === TYPO_INDEX ? { ...p, lng: -p.lng } : p,
 );
+
+/** Deterministic pseudo-random, so a generated fixture is reproducible across runs. */
+function rng(seed: number): () => number {
+	let s = seed;
+	return () => {
+		s = (s * 1664525 + 1013904223) % 4294967296;
+		return s / 4294967296;
+	};
+}
+
+/**
+ * `n` control points scattered over Britain with jittered pixel positions, so the data is not
+ * exactly representable and a smoothing term has work to do. Used to check that the spline's
+ * lambda means roughly the same thing at different control-point counts.
+ */
+export function jittered(n: number, seed = 12345): ControlPoint[] {
+	const r = rng(seed);
+	return Array.from({ length: n }, () => {
+		const lat = 50 + r() * 8;
+		const lng = -7 + r() * 8;
+		const [x, y] = truth(lat, lng);
+		return { px: x + (r() - 0.5) * 20, py: y + (r() - 0.5) * 20, lat, lng };
+	});
+}
+
+/**
+ * Four exactly collinear control points. Taken from the adversarial review that found the
+ * singularity check: before the pivot threshold became relative, these built "successfully" and
+ * a probe mapped to x=54.98 under affine and x=51.01 under the spline — two wrong answers that
+ * disagreed with each other, and which nothing downstream could catch, because the garbage
+ * forward and reverse fits were consistent with each other.
+ */
+export const COLLINEAR: readonly ControlPoint[] = Array.from({ length: 4 }, (_, i) => ({
+	px: 37.3 * i + 11.1,
+	py: 91.7 * i + 5.3,
+	lat: 0.17 * i + 3.3,
+	lng: 0.09 * i + 7.7,
+}));

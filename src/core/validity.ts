@@ -92,3 +92,33 @@ export function roundTrip(
 	const error = Math.hypot(dx, dy);
 	return { ok: Number.isFinite(error) && error <= tolerancePx, error };
 }
+
+/**
+ * The same test starting from a pixel, which is what a hover readout has.
+ *
+ * Only TWO evaluations are needed in this direction, and the discrepancy is already in pixels:
+ * reverse to world, forward back to a pixel, compare against where we started.
+ *
+ * This gate was missing. `toLatLng` carried a comment claiming the inverse direction needed no
+ * check because the query already holds a pixel — which is wrong twice over. A pixel outside the
+ * image is extrapolating just as much as a far-field coordinate is, and a near-singular fit
+ * returns confident finite garbage for a pixel that is perfectly in bounds.
+ */
+export function roundTripFromPixel(
+	forward: Mapping,
+	reverse: Mapping,
+	x: number,
+	y: number,
+	tolerancePx: number,
+): RoundTrip {
+	scratchA[0] = x;
+	scratchA[1] = y;
+	reverse.apply(scratchA, scratchB);
+	if (!Number.isFinite(scratchB[0]!) || !Number.isFinite(scratchB[1]!)) {
+		return { ok: false, error: Number.POSITIVE_INFINITY };
+	}
+
+	forward.apply(scratchB, scratchC);
+	const error = Math.hypot(scratchC[0]! - x, scratchC[1]! - y);
+	return { ok: Number.isFinite(error) && error <= tolerancePx, error };
+}

@@ -18,7 +18,8 @@
  *   - It needs four points. With exactly three a thin-plate spline IS an affine transform.
  */
 import { convexHull } from "./hull";
-import { fitMapping, TpsMapping } from "./mapping";
+import { solve } from "./linalg";
+import { fitMapping, INTERNAL_FOR_ORACLE, TpsMapping } from "./mapping";
 import type { ControlPoint, TransformOptions } from "./types";
 
 export interface PointResidual {
@@ -36,6 +37,12 @@ export interface Diagnostics {
 	readonly affineRms: number;
 	/** Present only for a thin-plate spline over four or more points. */
 	readonly loo?: readonly PointResidual[];
+	/**
+	 * RMS over INTERIOR points only. Hull points are predicted by extrapolation when left out, so
+	 * their errors are flagged non-diagnostic — averaging them into the headline number would let
+	 * the artefact dominate the one figure a user actually reads. Absent when every point is on
+	 * the hull, which is always true at n = 4.
+	 */
 	readonly looRms?: number;
 	/** Caveats that belong next to the numbers, not in a changelog. */
 	readonly notes: readonly string[];
@@ -117,18 +124,68 @@ export function tpsLooRippa(m: TpsMapping): number[] {
 }
 
 /**
- * Leave-one-out by actually refitting without each point. Exists as the independent oracle for
- * `tpsLooRippa` — it is O(n) fits and is not what the UI calls.
+ * Leave-one-out by actually re-solving the system with one row and column removed. The
+ * independent oracle for `tpsLooRippa` — O(n) solves, and not what the UI calls.
+ *
+ * It deliberately does NOT call `fitMapping`. The previous version did, and that was a real
+ * defect in the oracle rather than in the formula: re-fitting a subset through the public fitter
+ * re-normalises it, so the subset is centred and scaled differently and a DIFFERENT problem gets
+ * solved. At lambda = 0 the spline interpolates either way and the discrepancy hid; at lambda > 0
+ * the two disagreed by 1 to 3 percent, and `diagnose` runs with lambda > 0 in production. An
+ * oracle that solves a different problem cannot confirm anything.
+ *
+ * Rippa's identity concerns the same matrix A with row and column i struck out, so the smoothing
+ * diagonal is held at the FULL fit's value rather than recomputed for n-1 points.
  */
-export function tpsLooBruteForce(points: readonly ControlPoint[], lambda = 0): number[] {
+export function tpsLooIndependent(m: TpsMapping): number[] {
+	const { tpsKernel, smoothingDiagonal } = INTERNAL_FOR_ORACLE;
+	const n = m.pointCount;
+	const diag = smoothingDiagonal(m.lambda, n);
 	const out: number[] = [];
-	for (let i = 0; i < points.length; i++) {
-		const rest = points.filter((_, j) => j !== i);
-		const m = fitMapping(worldArray(rest), pixelArray(rest), { kind: "tps", lambda });
-		const probe = new Float64Array([points[i]!.lat, points[i]!.lng]);
-		const got = new Float64Array(2);
-		m.apply(probe, got);
-		out.push(Math.hypot(got[0]! - points[i]!.px, got[1]! - points[i]!.py));
+
+	for (let skip = 0; skip < n; skip++) {
+		const idx = Array.from({ length: n }, (_, i) => i).filter((i) => i !== skip);
+		const k = idx.length;
+		const size = k + 3;
+		const nx = idx.map((i) => [m.nodes[2 * i]!, m.nodes[2 * i + 1]!] as const);
+
+		const A: number[][] = Array.from({ length: size }, () => new Array<number>(size).fill(0));
+		const B: number[][] = Array.from({ length: size }, () => [0, 0]);
+		for (let a = 0; a < k; a++) {
+			for (let b = 0; b < k; b++) {
+				if (a === b) {
+					A[a]![b] = diag;
+					continue;
+				}
+				const dx = nx[a]![0] - nx[b]![0];
+				const dy = nx[a]![1] - nx[b]![1];
+				A[a]![b] = tpsKernel(dx * dx + dy * dy);
+			}
+			A[a]![k] = 1;
+			A[a]![k + 1] = nx[a]![0];
+			A[a]![k + 2] = nx[a]![1];
+			A[k]![a] = 1;
+			A[k + 1]![a] = nx[a]![0];
+			A[k + 2]![a] = nx[a]![1];
+			B[a] = [m.targets[idx[a]!]![0]!, m.targets[idx[a]!]![1]!];
+		}
+
+		const c = solve(A, B);
+		const qx = m.nodes[2 * skip]!;
+		const qy = m.nodes[2 * skip + 1]!;
+		let ex = c[k]![0]! + c[k + 1]![0]! * qx + c[k + 2]![0]! * qy;
+		let ey = c[k]![1]! + c[k + 1]![1]! * qx + c[k + 2]![1]! * qy;
+		for (let a = 0; a < k; a++) {
+			const dx = qx - nx[a]![0];
+			const dy = qy - nx[a]![1];
+			const u = tpsKernel(dx * dx + dy * dy);
+			ex += c[a]![0]! * u;
+			ey += c[a]![1]! * u;
+		}
+
+		const tx = m.targets[skip]![0]!;
+		const ty = m.targets[skip]![1]!;
+		out.push(Math.hypot(ex - tx, ey - ty) / m.dstScale);
 	}
 	return out;
 }
@@ -175,5 +232,15 @@ export function diagnose(points: readonly ControlPoint[], opts: TransformOptions
 	}
 
 	const base = { affine, affineRms: rms(affine.map((r) => r.error)), notes };
-	return loo === undefined ? base : { ...base, loo, looRms: rms(loo.map((r) => r.error)) };
+	if (loo === undefined) return base;
+
+	// Interior points only — see the note on `looRms`.
+	const interior = loo.filter((r) => !r.onHull).map((r) => r.error);
+	if (interior.length === 0) {
+		notes.push(
+			"Every control point is on the hull, so leave-one-out has nothing to say: each point is extrapolated to when left out. Four points are always in this position.",
+		);
+		return { ...base, loo };
+	}
+	return { ...base, loo, looRms: rms(interior) };
 }

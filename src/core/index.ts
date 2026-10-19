@@ -18,12 +18,13 @@ export {
 	type PixelResult,
 	type WorldResult,
 } from "./fit";
+export { FitError, InvalidInputError, SingularMatrixError } from "./errors";
 export { convexHull, inHull, type Vec2 } from "./hull";
-export { FitError, fitMapping, TpsMapping } from "./mapping";
+export { fitMapping, TpsMapping } from "./mapping";
 export {
 	affineResiduals,
 	diagnose,
-	tpsLooBruteForce,
+	tpsLooIndependent,
 	tpsLooRippa,
 	type Diagnostics,
 	type PointResidual,
@@ -38,5 +39,11 @@ export {
 	type TransformKind,
 	type TransformOptions,
 } from "./types";
-export { DEFAULT_ROUND_TRIP_TOLERANCE_FRACTION, roundTrip, roundTripTolerance, type RoundTrip } from "./validity";
-export { SingularMatrixError } from "./linalg";
+export {
+	DEFAULT_ROUND_TRIP_TOLERANCE_FRACTION,
+	roundTrip,
+	roundTripFromPixel,
+	roundTripTolerance,
+	type RoundTrip,
+} from "./validity";
+export { RELATIVE_PIVOT_EPSILON } from "./linalg";

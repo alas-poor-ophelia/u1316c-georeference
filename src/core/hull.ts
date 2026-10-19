@@ -18,8 +18,13 @@ export interface Vec2 {
  * Fewer than three input points, or wholly collinear input, returns the degenerate hull.
  */
 export function convexHull(pts: readonly Vec2[]): Vec2[] {
-	if (pts.length < 3) return [...pts];
-	const sorted = [...pts].sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+	// A non-finite coordinate breaks the sort comparator, and a broken comparator does not merely
+	// mis-order: an eight-point set containing one NaN produced an ELEVEN-vertex hull. The fitters
+	// reject non-finite input before reaching here, but this routine is public, so it defends
+	// itself rather than relying on its callers.
+	const finite = pts.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+	if (finite.length < 3) return [...finite];
+	const sorted = [...finite].sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
 
 	const cross = (o: Vec2, a: Vec2, b: Vec2): number => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
 
