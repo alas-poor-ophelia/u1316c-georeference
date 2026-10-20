@@ -86,6 +86,29 @@ export class ObsidianVault implements VaultPort {
 		}
 		return out;
 	}
+
+	/**
+	 * Created EMPTY, then filled through `processFrontMatter`.
+	 *
+	 * Geb never serialises YAML itself. Writing `geb-fits` by hand would mean reproducing
+	 * Obsidian's quoting and escaping rules for nested lists of mappings, and getting that subtly
+	 * wrong is how a georeference becomes unreadable to the very parser that wrote it. Obsidian
+	 * owns the serialisation on both sides.
+	 *
+	 * `vault.create` rejects on an existing path, which is the behaviour wanted: a create that
+	 * silently overwrote a note would destroy whatever was there.
+	 */
+	async createNote(notePath: string, mutate: (fm: Record<string, unknown>) => void): Promise<void> {
+		const created = await this.app.vault.create(notePath, "");
+		await this.app.fileManager.processFrontMatter(created, mutate);
+	}
+
+	/** Trash, not destroy — `trashFile` honours the user's own "deleted files" preference. */
+	async trashNote(notePath: string): Promise<void> {
+		const f = this.file(notePath);
+		if (f === null) throw new Error(`cannot trash, no such note: ${notePath}`);
+		await this.app.fileManager.trashFile(f);
+	}
 }
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "bmp", "webp", "avif", "svg"]);

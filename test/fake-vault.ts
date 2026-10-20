@@ -24,6 +24,13 @@
  *     a write, so a stale-read bug cannot surface here. The reconcile and rename paths re-read
  *     inside the mutator precisely because of that lag, and this fake cannot prove it matters.
  *   - The exact shortest-path ranking for an ambiguous link.
+ *   - `createNote` stores the frontmatter RECORD directly. The real adapter creates an empty note
+ *     and hands the record to Obsidian's `processFrontMatter`, which serialises it to YAML — so a
+ *     record that cannot survive that round trip (a nested list of mappings quoted wrongly, a key
+ *     YAML reads back as a different type) is invisible here. This fake cannot fail a YAML
+ *     round-trip test, and `geb-fits` is exactly the nested shape most at risk.
+ *   - `trashNote` removes the note outright. The real one trashes it, recoverably, so no test
+ *     here can show that a deleted georeference is still retrievable by the user.
  *
  * Anything depending on those belongs in a real-vault test, not here.
  */
@@ -46,6 +53,9 @@ export class FakeVault implements VaultPort {
 	readonly binaries = new Map<string, ArrayBuffer>();
 	/** Every writeFrontmatter call, so a test can assert that nothing was written. */
 	readonly writes: string[] = [];
+	/** Every createNote and trashNote call, for the same reason. */
+	readonly creates: string[] = [];
+	readonly trashed: string[] = [];
 	/** Note paths whose writes should reject, for testing per-note isolation. */
 	readonly failWrites = new Set<string>();
 
@@ -88,8 +98,33 @@ export class FakeVault implements VaultPort {
 		}
 	}
 
+	/**
+	 * When true, `readFrontmatter` serves the state as of BEFORE the most recent write to a path,
+	 * modelling Obsidian's metadata cache lagging behind `processFrontMatter`.
+	 *
+	 * Without this the fake is more permissive than reality in the one way that matters most for
+	 * the API: it hands back the live object, so a read-after-write always sees the write and a
+	 * test of "the write must return what it wrote rather than re-reading" cannot fail. That bug
+	 * is deterministic in the real app and would hit the first write a UI makes.
+	 */
+	lagReads = false;
+	/** Pre-write state per path while lagging. A null entry means "did not exist yet". */
+	private readonly lagged = new Map<string, Record<string, unknown> | null>();
+
+	/** The metadata cache catching up — what Obsidian's `changed` event stands for. */
+	settleCache(): void {
+		this.lagged.clear();
+	}
+
 	readFrontmatter(notePath: string): Record<string, unknown> | null {
+		if (this.lagReads && this.lagged.has(notePath)) return this.lagged.get(notePath) ?? null;
 		return this.notes.get(notePath) ?? null;
+	}
+
+	private lag(notePath: string, before: Record<string, unknown> | null): void {
+		if (this.lagReads && !this.lagged.has(notePath)) {
+			this.lagged.set(notePath, before === null ? null : structuredClone(before));
+		}
 	}
 
 	writeFrontmatter(notePath: string, mutate: (fm: Record<string, unknown>) => void): Promise<void> {
@@ -97,6 +132,7 @@ export class FakeVault implements VaultPort {
 		if (fm === undefined) return Promise.reject(new Error(`no such note: ${notePath}`));
 		if (this.failWrites.has(notePath)) return Promise.reject(new Error(`write refused: ${notePath}`));
 		this.writes.push(notePath);
+		this.lag(notePath, fm);
 		mutate(fm);
 		return Promise.resolve();
 	}
@@ -151,5 +187,31 @@ export class FakeVault implements VaultPort {
 			out.push({ path: p, byteLength: this.binaries.get(p)?.byteLength ?? 0 });
 		}
 		return out;
+	}
+
+	createNote(notePath: string, mutate: (fm: Record<string, unknown>) => void): Promise<void> {
+		// Rejecting on an existing path is the one behaviour of `vault.create` worth reproducing:
+		// a create that overwrote would destroy a note.
+		if (this.notes.has(notePath) || this.files.has(notePath)) {
+			return Promise.reject(new Error(`already exists: ${notePath}`));
+		}
+		// A note that has just been created is not in the cache AT ALL, which is a harder lag than
+		// a stale value: a read-back returns null and the caller is told its own new georeference
+		// does not exist.
+		this.lag(notePath, null);
+		const fm: Record<string, unknown> = {};
+		mutate(fm);
+		this.notes.set(notePath, fm);
+		this.files.add(notePath);
+		this.creates.push(notePath);
+		return Promise.resolve();
+	}
+
+	trashNote(notePath: string): Promise<void> {
+		if (!this.notes.has(notePath)) return Promise.reject(new Error(`no such note: ${notePath}`));
+		this.notes.delete(notePath);
+		this.files.delete(notePath);
+		this.trashed.push(notePath);
+		return Promise.resolve();
 	}
 }

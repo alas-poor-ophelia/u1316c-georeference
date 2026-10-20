@@ -107,6 +107,26 @@ export interface VaultPort {
 	 * without reading the file, via `TFile.stat.size`.
 	 */
 	listCandidateImages(): readonly { readonly path: string; readonly byteLength: number }[];
+	/**
+	 * Create a note carrying this frontmatter. Rejects if the path is already taken.
+	 *
+	 * The API's `createGeoref` is the first thing in Geb that must MAKE a note rather than edit
+	 * one, and until now this port could only read, list and write frontmatter. Frontmatter is
+	 * filled by a MUTATOR, never handed over as YAML text: no part of Geb serialises YAML, and
+	 * taking a mutator rather than a record means a caller can capture what it wrote from inside
+	 * the callback. That matters because a newly created note is not in the metadata cache yet, so
+	 * reading it back after the create returns nothing — the same read-your-writes trap that
+	 * applies to editing. One capture mechanism for both, not two.
+	 */
+	createNote(notePath: string, mutate: (fm: Record<string, unknown>) => void): Promise<void>;
+	/**
+	 * Send a note to the user's trash. NOT a permanent delete.
+	 *
+	 * `deleteGeoref` discards a georeference its owner may have spent an hour placing control
+	 * points on, and the only honest default for that is recoverable. The adapter routes it
+	 * through Obsidian's own trash handling, so it obeys whatever the user configured.
+	 */
+	trashNote(notePath: string): Promise<void>;
 }
 
 /** Frontmatter keys. One place, so a rename of a key is a one-line change. */
