@@ -51,7 +51,10 @@ export function georefsCovering(
 	const out: Coverage[] = [];
 	for (const g of index.georefs) {
 		// A coordinate in one system says nothing about a map georeferenced in another. This is
-		// the check that lets an Earth map and a Faerun map coexist in one vault.
+		// what WILL let an Earth map and a Faerun map coexist in one vault — but the registry
+		// holds only `earth` today, so a second world is not yet reachable through a place note:
+		// `readFeature` refuses an unregistered crs. What this guard does now is keep a map whose
+		// crs is misspelled from answering Earth queries.
 		if (g.record.crs !== crs) continue;
 		const c = place(g, lat, lng);
 		if (c !== null) out.push(c);
@@ -60,18 +63,29 @@ export function georefsCovering(
 }
 
 /**
- * Every place note that lands on this map.
+ * Every place note that lands on this map, or `null` if no such map is LOADED.
+ *
+ * The null is the whole point of the signature. Returning `[]` for an id that is not in the index
+ * made "this map was rejected — a duplicate id, degenerate control points — and has no pins"
+ * indistinguishable from "this map loaded fine and has no pins". A caller rendering an empty
+ * pin layer would tell the user their map was empty when in fact it never loaded, which is the
+ * silent failure this layer exists to prevent. On `null`, look the id up in `index.rejected` for
+ * the reason.
  *
  * `find` on the id is safe because `buildIndex` rejects a duplicate id rather than loading both:
  * otherwise the second note would be permanently unreachable through this function while still
  * appearing in `georefsCovering` under the same id.
  */
-export function featuresIn(index: WorldIndex, georefId: string): Pin[] {
+export function featuresIn(index: WorldIndex, georefId: string): Pin[] | null {
 	const g = index.georefs.find((x) => x.record.id === georefId);
-	if (g === undefined) return [];
+	if (g === undefined) return null;
 
 	const out: Pin[] = [];
 	for (const feature of index.features) {
+		// Reachable today through a MISSPELLED map, not through a second world: a georeference
+		// with `geb-crs: "erath"` loads (reported, but loaded), so its crs really can differ from
+		// every feature's. Without this filter that map would pin every Earth feature through a
+		// transform that means nothing for them.
 		if (feature.crs !== g.record.crs) continue;
 		const c = place(g, feature.lat, feature.lng);
 		if (c !== null) out.push({ ...c, feature });

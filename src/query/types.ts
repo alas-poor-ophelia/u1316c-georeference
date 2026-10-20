@@ -4,11 +4,20 @@
  * Same fence as the kernel and the persistence layer — no Obsidian imports. Everything comes
  * through `VaultPort`.
  *
- * NO CACHING, and the numbers say that is affordable. Measured: 50,000 notes with 10,000 carrying
- * coordinates builds in 7 to 13 ms; fifty spline georeferences of thirty points each in 29 ms;
- * queries afterwards are 0.06 ms. What it does NOT survive is a rebuild per render frame, per
+ * NO CACHING, and the numbers say that is affordable — but quote them in full, because the short
+ * version of this paragraph understated its own measurements and the phase-4 decision reads it.
+ *
+ *   build: 50,000 notes with 10,000 carrying coordinates   7–13 ms
+ *   build: 50 spline georeferences, 30 points each         29 ms
+ *   build: ONE spline georeference of 300 points           214 ms   <- the worst case
+ *   query: georefsCovering across twenty maps              0.06 ms
+ *   query: featuresIn across 4,000 features                4.5 ms
+ *
+ * So "queries afterwards are negligible" is true of `georefsCovering` and seventy-five times
+ * wrong about `featuresIn`. What this does NOT survive is a rebuild per render frame, per
  * keystroke while control points are being placed on a large spline, or per file-change event
- * during a sync burst — a thousand changes against 30 ms is thirty seconds. So the rebuild
+ * during a sync burst. A thousand changes costs thirty seconds at 30 ms — and the per-keystroke
+ * case is the 300-point spline, where it is nearer three and a half minutes. So the rebuild
  * trigger is a real design decision, and it is deferred to the API phase on purpose rather than
  * guessed at here. See the note in SCOPE.md.
  */
@@ -56,6 +65,8 @@ export type ProblemCode =
 	| "unknown-crs"
 	| "bad-uncertainty"
 	| "bad-certainty"
+	/** A text field — a date, a calendar name — holds something that is neither text nor a number. */
+	| "bad-text"
 	| "duplicate-id"
 	/** Loaded, but with data dropped; must not be saved until the user fixes it. */
 	| "lossy-record"

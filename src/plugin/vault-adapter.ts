@@ -1,5 +1,6 @@
 import { TFile, type App } from "obsidian";
-import { KEY, type VaultPort } from "../persist/types";
+import { looksLikeGeoref } from "../persist/serialize";
+import type { VaultPort } from "../persist/types";
 
 /**
  * The one place Geb touches a vault. Everything in src/persist reaches the app through this, and
@@ -63,7 +64,10 @@ export class ObsidianVault implements VaultPort {
 		const out: string[] = [];
 		for (const f of this.app.vault.getMarkdownFiles()) {
 			const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
-			if (fm !== undefined && typeof fm[KEY.id] === "string") out.push(f.path);
+			// `looksLikeGeoref` rather than a second copy of the test. The copy here and the one in
+			// src/query/store.ts both read `typeof geb-id === "string"`, so `geb-id: 1066` was
+			// excluded in four places at once with nothing reported anywhere.
+			if (looksLikeGeoref(fm)) out.push(f.path);
 		}
 		return out;
 	}

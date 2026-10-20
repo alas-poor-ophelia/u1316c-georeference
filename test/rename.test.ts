@@ -165,6 +165,62 @@ describe("renames that are none of Geb's business", () => {
 	});
 });
 
+describe("notes the widened georeference predicate newly admits", () => {
+	// `looksLikeGeoref` used to test `typeof geb-id === "string"`, so none of these reached this
+	// handler at all. Every test in this file seeded a string id, which left the whole behaviour
+	// below unpinned once the predicate changed.
+	for (const [label, id] of [
+		["a numeric id", 1066],
+		["a boolean id", true],
+		["a list id", ["x"]],
+	] as const) {
+		test(`${label} still gets its image link repaired, because rename touches only that key`, async () => {
+			// DELIBERATE, and the asymmetry with reconcile is the point: reconcile refuses to
+			// write an unparsable record because it writes a DERIVED record, while this touches
+			// the image link alone. Refusing here would mean a typo in `geb-id` permanently
+			// breaks that map's image link on every future rename.
+			v = new FakeVault();
+			v.addFile(IMAGE);
+			v.addNote(NOTE, { [KEY.id]: id, [KEY.image]: "[[britain-5c.png]]", [KEY.fits]: [] });
+			v.movePreservingLinks(IMAGE, RENAMED);
+
+			const out = await handleRename(v, IMAGE, RENAMED);
+			expect(out[0]!.action).toBe("rewritten");
+			expect(link()).toBe("[[britain-5th-century.png]]");
+			// The record itself is untouched: the bad id is still there for the user to fix.
+			expect(v.readFrontmatter(NOTE)?.[KEY.id]).toEqual(id);
+		});
+	}
+
+	for (const [label, blank] of [
+		["a bare geb-id key", { [KEY.id]: null }],
+		["a bare geb-fits key", { [KEY.fits]: null }],
+	] as const) {
+		test(`a place note with ${label} is never listed, so it is never written`, async () => {
+			// A blank key claims nothing. Counting it meant an ordinary place note that happened
+			// to carry one had its frontmatter rewritten by an unrelated vault rename.
+			//
+			// ASSERTED AT THE LISTING LAYER ON PURPOSE. The first version of this test asserted
+			// `convergeNote`'s own `not-ours` branch, and deleting that branch left the suite
+			// green: `handleRename` walks `listGeorefNotes()`, which filters by the same
+			// predicate, so the note never reaches `convergeNote` at all. That branch is a
+			// defensive backstop, and the exclusion that actually protects this note happens
+			// here. The same vacuous shape this whole review round is about.
+			// NO `geb-image` on this fixture. The first version had one, which made it artificial:
+			// `geb-image` is a georeference-only key, so a note carrying it IS claiming to be a
+			// map, and the predicate now rightly says so. A real place note has none.
+			v = new FakeVault();
+			v.addFile(IMAGE);
+			v.addNote("places/Eboracum.md", { lat: 53.9591, lng: -1.0815, ...blank });
+			v.movePreservingLinks(IMAGE, RENAMED);
+
+			expect(v.listGeorefNotes()).toEqual([]);
+			expect(await handleRename(v, IMAGE, RENAMED)).toEqual([]);
+			expect(v.writes).toHaveLength(0);
+		});
+	}
+});
+
 describe("the sidecar note itself moving", () => {
 	test("leaves a still-resolving link alone", async () => {
 		// Corrected expectation. An earlier version renormalised the text here, which was Geb

@@ -41,7 +41,26 @@ async function convergeNote(
 	newPath: string,
 ): Promise<RenameOutcome> {
 	const fm = port.readFrontmatter(notePath);
+	// A DEFENSIVE BACKSTOP, and very nearly unreachable: the only caller walks
+	// `listGeorefNotes()`, which filters by this same predicate. Not strictly unreachable, and an
+	// earlier version of this comment overstated that — `handleRename` takes the listing as one
+	// snapshot and then awaits a write per note, so the frontmatter can be cleared or the note
+	// deleted in between, and `readFrontmatter` then returns null here. Narrow, but real. The
+	// exclusion that actually protects a place note happens at the listing layer, which is where
+	// the test asserts it.
 	if (!looksLikeGeoref(fm)) return { notePath, action: "not-ours" };
+
+	// DELIBERATE ASYMMETRY WITH RECONCILE, now that the predicate above admits a note whose record
+	// cannot be parsed (`geb-id: 1066`, say): rename repairs such a note's image link and
+	// reconcile reports it as unparsable instead.
+	//
+	// NOT because reconcile is protecting the record — an earlier version of this comment claimed
+	// that and it is false. `reconcileNote` writes exactly one key, `geb-image`, the same single
+	// key written here. It stops early because it NEEDS the parsed record: re-finding a lost image
+	// by content means reading the stored hash and byte length, and an unparsable record has
+	// neither. This path needs only the stored link text, which survives a broken `geb-id`.
+	// Refusing here would mean one typo permanently breaks that map's image link on every future
+	// rename. So: repair the link, never the record.
 
 	const stored = fm?.[KEY.image];
 	const link = typeof stored === "string" ? stored.trim() : "";

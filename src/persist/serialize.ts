@@ -191,6 +191,10 @@ export function fromFrontmatter(fm: unknown): ParseResult<Georeference> {
 		ctx.problems.push(`${KEY.crs} is not a string; assuming earth`);
 	} else if (fm[KEY.crs] === undefined) {
 		ctx.problems.push(`${KEY.crs} is missing; assuming earth`);
+	} else if (fm[KEY.crs] === "") {
+		// An empty string is a key the user typed and left blank. It defaulted in silence, which
+		// is the one outcome this parser is not allowed to produce.
+		ctx.problems.push(`${KEY.crs} is empty; assuming earth`);
 	} else if (getCrs(crs) === null) {
 		// A misspelled or differently-cased crs used to load with no complaint at all, and then
 		// match no query — a map that silently covers nothing, which is the hardest possible bug
@@ -230,7 +234,31 @@ export function fromFrontmatter(fm: unknown): ParseResult<Georeference> {
 	return { value: { id, imageLink, image, crs, fits }, problems: ctx.problems, lossy: ctx.lossy };
 }
 
-/** Whether a note's frontmatter even claims to be a georeference, cheaply, before full parsing. */
+/**
+ * Whether a note's frontmatter even CLAIMS to be a georeference, cheaply, before full parsing.
+ *
+ * Key PRESENCE, whatever the value's type. This used to test `typeof fm[KEY.id] === "string"`,
+ * which silently excluded the likeliest bad input there is: `geb-id: 1066` is a YAML number, so a
+ * map titled by year was never listed as a georeference, never reached `fromFrontmatter`, and
+ * produced no rejection and no problem anywhere. The report for a non-string id already existed —
+ * it was simply unreachable, because the predicate deciding WHICH notes get parsed sat above it
+ * and used a narrower test than the data.
+ *
+ * So this is deliberately generous: anything claiming to be a georeference gets parsed, and
+ * `fromFrontmatter` decides whether it is usable and says why. `geb-fits` counts too, because a
+ * note carrying fits but no id is an attempted georeference and used to be pinned as a PLACE.
+ *
+ * A NULL does not count, though. YAML reads a bare `geb-id:` as null, and a template leaving the
+ * key blank has not claimed anything. Counting it meant a place note carrying a blank `geb-fits:`
+ * vanished from `features`, and — because `handleRename` gates on this predicate and never calls
+ * `fromFrontmatter` — that place note's frontmatter got REWRITTEN on an unrelated vault rename.
+ *
+ * EVERY georeference key counts, not just `id` and `fits`. Checking only those two re-created the
+ * original defect in a narrower form: a half-filled template, `geb-id:` and `geb-fits:` left
+ * blank with `geb-image` and `geb-image-size` filled in, was excluded again with nothing
+ * reported. `KEY` holds exactly the georeference-only keys — a place note's own `geb-from`,
+ * `geb-certainty` and the rest are not in it — so the whole record is the claim.
+ */
 export function looksLikeGeoref(fm: unknown): boolean {
-	return isRecord(fm) && typeof fm[KEY.id] === "string";
+	return isRecord(fm) && Object.values(KEY).some((k) => fm[k] != null);
 }

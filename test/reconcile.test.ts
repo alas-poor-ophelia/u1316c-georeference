@@ -138,6 +138,28 @@ describe("duplicate ids", () => {
 	});
 });
 
+describe("notes the widened georeference predicate newly admits", () => {
+	// None of these reached `reconcile` while the predicate tested `typeof geb-id === "string"`,
+	// and every test in this file seeds a string id, so the behaviour below was unpinned.
+	for (const [label, fm] of [
+		["a numeric id", { "geb-id": 1066, "geb-image": "[[britain-5c.png]]" }],
+		["a boolean id", { "geb-id": true, "geb-image": "[[britain-5c.png]]" }],
+		["fits but no id", { "geb-fits": [], "geb-image": "[[britain-5c.png]]" }],
+	] as const) {
+		test(`${label} is reported as unparsable and NEVER written`, async () => {
+			// The guarantee that makes the widening safe here: reconcile writes a derived record,
+			// so a record it cannot read must not be written — writing it would delete exactly
+			// the data the user needs in order to fix it.
+			v.addNote("maps/Broken.md", { ...fm });
+			const out = await reconcile(v);
+			const broken = out.find((o) => o.notePath === "maps/Broken.md");
+			expect(broken).toBeDefined();
+			expect(broken!.action).toBe("unparsable");
+			expect(v.writes).not.toContain("maps/Broken.md");
+		});
+	}
+});
+
 describe("lifecycle", () => {
 	test("shouldContinue stops the walk, so an unloaded plugin stops writing", async () => {
 		const out = await reconcile(v, () => false);

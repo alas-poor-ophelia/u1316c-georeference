@@ -14,8 +14,18 @@
  *   - `makeLink` counted basenames case-sensitively while `resolveLink` matched
  *     case-insensitively, so the two disagreed about what "unique" meant.
  *
- * What remains approximate: the exact shortest-path ranking. Anything depending on that belongs
- * in a real-vault test, not here.
+ * What remains approximate, each one a test that CANNOT fail here:
+ *
+ *   - `listCandidateImages` treats every non-`.md` file as an image candidate, while the real
+ *     adapter filters by `IMAGE_EXTENSIONS` (png, jpg, jpeg, gif, bmp, webp, avif, svg). Adding
+ *     that filter to this fake leaves the whole suite green, so the adapter's filter is
+ *     unexercised and no test here can show a `.txt` being refused as an image.
+ *   - `readFrontmatter` hands back the LIVE mutable object. Obsidian's metadata cache lags behind
+ *     a write, so a stale-read bug cannot surface here. The reconcile and rename paths re-read
+ *     inside the mutator precisely because of that lag, and this fake cannot prove it matters.
+ *   - The exact shortest-path ranking for an ambiguous link.
+ *
+ * Anything depending on those belongs in a real-vault test, not here.
  */
 import type { VaultPort } from "../src/persist/types";
 import { looksLikeGeoref } from "../src/persist/serialize";

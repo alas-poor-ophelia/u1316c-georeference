@@ -7,8 +7,8 @@
  * path baked into it, so a UI can link to the note and sort by severity without parsing text.
  */
 import { buildFit } from "../core/fit";
-import { fromFrontmatter } from "../persist/serialize";
-import { KEY, type VaultPort } from "../persist/types";
+import { fromFrontmatter, looksLikeGeoref } from "../persist/serialize";
+import type { VaultPort } from "../persist/types";
 import { readFeature } from "./features";
 import type { Feature, LoadedGeoref, Problem, RejectedGeoref, WorldIndex } from "./types";
 
@@ -46,6 +46,11 @@ function loadGeoref(
 		return { notePath, code: "unknown-image-size", id: record.id, reason: "image size is unknown, so coverage cannot be determined" };
 	}
 
+	// A DEFENSIVE BACKSTOP, not a reachable path: `fromFrontmatter` already returns a null value
+	// when `fits` is empty, so such a note is rejected as `unparsable` before it gets here and
+	// `no-fits` cannot currently be emitted. Kept because it is what makes `fits[0]` safe without
+	// a non-null assertion, and because the invariant lives in another file. Pinned by the test
+	// "an empty fits list is rejected by the parser, before the store's backstop".
 	const first = record.fits[0];
 	if (first === undefined) return { notePath, code: "no-fits", id: record.id, reason: "no fits" };
 	if (record.fits.length > 1) {
@@ -123,7 +128,11 @@ export function buildIndex(port: VaultPort): WorldIndex {
 		const fm = port.readFrontmatter(notePath);
 		// A georeference note is not also a place note. Without this, a sidecar that happened to
 		// carry lat/lng would be pinned on itself and on every other map.
-		if (fm !== null && typeof fm[KEY.id] === "string") continue;
+		//
+		// The SAME predicate the vault adapter uses to list georeferences, deliberately: this was
+		// a second copy of `typeof geb-id === "string"`, so a note with `geb-id: 1066` was neither
+		// listed as a georeference nor excluded from here — it was pinned as a place instead.
+		if (looksLikeGeoref(fm)) continue;
 		const f = readFeature(notePath, fm, problems);
 		if (f !== null) features.push(f);
 	}
