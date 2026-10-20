@@ -21,6 +21,22 @@ import type { GebErrorCode } from "./errors";
 
 export const API_VERSION = 1 as const;
 
+/**
+ * RE-EXPORTED so this module is the single import point for the whole public surface, matching
+ * `types/geb.d.ts` name for name.
+ *
+ * Found by building the view, which is what the view is for. These shapes are published in the
+ * standalone `.d.ts` a consumer copies, but a consumer reading the source tree instead had to
+ * reach into `src/core` to NAME any of them — and the view is fenced out of `src/core` by the
+ * phase-5 gate, so it could use a `ControlPoint` and not declare one. Either the fence was wrong
+ * or the surface was incomplete; the surface was incomplete.
+ */
+export type { Diagnostics, PointResidual } from "../core/residuals";
+export type { ControlPoint, LatLng, Pixel, TransformKind, TransformOptions } from "../core/types";
+export type { Staleness } from "../persist/types";
+export type { CoordinateSource, ProblemCode, RejectionCode } from "../query/types";
+export type { GebErrorCode, CodedError } from "./errors";
+
 /** A coordinate reference system, as handed out. *(API 1)* */
 export interface CrsInfo {
 	readonly id: string;

@@ -66,6 +66,51 @@ export default tseslint.config(
 		},
 	},
 	{
+		// THE PHASE-5 GATE, as a fence rather than a promise.
+		//
+		// The build order says the view must create a georeference and its control points
+		// "through the public API only, with no private access — that is what makes the
+		// dogfooding claim real". Asserted in prose that claim is unfalsifiable: nothing stops a
+		// view from importing `buildFit` directly the first time the public surface is awkward,
+		// and the awkwardness is precisely the signal the dogfooding exists to surface.
+		//
+		// So the view may reach for Obsidian (it IS the Obsidian layer) and for `src/api/types`
+		// and `src/api/errors` — the published surface and its error codes, the same two things a
+		// third-party consumer gets. Everything else in the plugin is off limits: the kernel, the
+		// persistence layer, the query layer, and the API's own controller and host. If the view
+		// needs something it cannot reach, the answer is to add it to the public API, which is the
+		// whole point of building the view second.
+		files: ["src/view/**/*.ts"],
+		rules: {
+			"no-restricted-imports": [
+				"error",
+				{
+					patterns: [
+						{
+							group: [
+								"../core",
+								"../core/*",
+								"../core/**",
+								"../persist",
+								"../persist/*",
+								"../persist/**",
+								"../query",
+								"../query/*",
+								"../query/**",
+								"../api/controller",
+								"../api/host",
+								"../plugin/*",
+								"../plugin/**",
+							],
+							message:
+								"The view consumes Geb ONLY through the public API (src/api/types, src/api/errors) — that is the phase-5 dogfooding gate. If something is missing, add it to the API.",
+						},
+					],
+				},
+			],
+		},
+	},
+	{
 		// Scripts and tests are Bun programs: console output and node: imports are the job.
 		files: ["test/**/*.ts", "scripts/**/*.ts"],
 		rules: {
