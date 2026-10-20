@@ -55,6 +55,10 @@ export class ObsidianVault implements VaultPort {
 		return await this.app.vault.readBinary(f);
 	}
 
+	listNotes(): readonly string[] {
+		return this.app.vault.getMarkdownFiles().map((f) => f.path);
+	}
+
 	listGeorefNotes(): readonly string[] {
 		const out: string[] = [];
 		for (const f of this.app.vault.getMarkdownFiles()) {

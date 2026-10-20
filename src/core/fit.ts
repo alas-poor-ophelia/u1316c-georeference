@@ -97,6 +97,15 @@ export function buildFit(
 	});
 
 	const hullXY = convexHull(points.map((p) => ({ x: p.lng, y: p.lat })));
+
+	// Diagnostics are computed on first access, not at fit time, and then memoised.
+	//
+	// Measured: for a 300-point spline, `buildFit` cost 268ms of which `diagnose` was 89ms —
+	// an affine fit plus a leave-one-out matrix inversion. The coverage layer builds a fit for
+	// every georeference in the vault and never reads diagnostics at all, so that was a third of
+	// the index build spent on numbers nobody looked at. A getter keeps the interface identical.
+	let cached: Diagnostics | null = null;
+
 	return {
 		kind: opts.kind,
 		points: [...points],
@@ -105,7 +114,10 @@ export function buildFit(
 		hull: hullXY.map((v) => ({ lat: v.y, lng: v.x })),
 		hullXY,
 		bounds,
-		diagnostics: diagnose(points, opts),
+		get diagnostics(): Diagnostics {
+			cached ??= diagnose(points, opts);
+			return cached;
+		},
 	};
 }
 

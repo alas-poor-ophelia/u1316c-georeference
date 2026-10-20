@@ -51,14 +51,15 @@ export default tseslint.config(
 		},
 	},
 	{
-		// src/persist holds the same property for a harder case: it is ABOUT the vault, and still
-		// never imports it. Everything it needs is behind VaultPort, which the plugin layer
-		// implements and the tests fake — so rename behaviour is testable without an app.
-		files: ["src/persist/**/*.ts"],
+		// src/persist and src/query hold the same property for a harder case: they are ABOUT the
+		// vault, and still never import it. Everything they need is behind VaultPort, which the
+		// plugin layer implements and the tests fake — so rename behaviour and coverage queries
+		// are testable without an app.
+		files: ["src/persist/**/*.ts", "src/query/**/*.ts"],
 		rules: {
 			"no-restricted-imports": [
 				"error",
-				{ patterns: [{ group: ["obsidian", "../plugin/*", "../plugin/**"], message: "src/persist reaches the vault only through VaultPort." }] },
+				{ patterns: [{ group: ["obsidian", "../plugin/*", "../plugin/**"], message: "src/persist and src/query reach the vault only through VaultPort." }] },
 			],
 		},
 	},

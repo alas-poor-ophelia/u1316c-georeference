@@ -13,6 +13,7 @@
  * missing `geb-crs` is defaulted and reported but costs nothing to re-save; a control point whose
  * latitude reads `"51,5"` is data the user has to see in order to fix.
  */
+import { getCrs, inDomain } from "../core/crs";
 import { MIN_POINTS, type TransformKind } from "../core/types";
 import { KEY, type Georeference, type ParseResult, type StoredFit, type StoredPoint } from "./types";
 
@@ -86,10 +87,12 @@ function parsePoint(v: unknown, where: string, ctx: Ctx): StoredPoint | null {
 		return null;
 	}
 
-	// Range checks. A coordinate outside its system is not a near-miss to be carried quietly; it
-	// is a typo, and the earlier version reported nothing at all for lat 999 or px -9.
-	if (ctx.crs === "earth" && (lat < -90 || lat > 90 || lng < -180 || lng > 180)) {
-		ctx.problems.push(`${where} is outside Earth's coordinate range (lat ${lat}, lng ${lng})`);
+	// Range checks against the CRS record itself, not a hardcoded Earth literal. The rule used to
+	// be spelled out here AND in the coverage layer, keyed on the string "earth", which is how a
+	// misspelled or differently-cased crs slipped through both unchecked.
+	const crs = getCrs(ctx.crs);
+	if (crs !== null && !inDomain(crs, lat, lng)) {
+		ctx.problems.push(`${where} is outside ${crs.name}'s coordinate range (lat ${lat}, lng ${lng})`);
 		ctx.lossy = true;
 		return null;
 	}
@@ -188,6 +191,11 @@ export function fromFrontmatter(fm: unknown): ParseResult<Georeference> {
 		ctx.problems.push(`${KEY.crs} is not a string; assuming earth`);
 	} else if (fm[KEY.crs] === undefined) {
 		ctx.problems.push(`${KEY.crs} is missing; assuming earth`);
+	} else if (getCrs(crs) === null) {
+		// A misspelled or differently-cased crs used to load with no complaint at all, and then
+		// match no query — a map that silently covers nothing, which is the hardest possible bug
+		// for a user to report.
+		ctx.problems.push(`${KEY.crs} "${crs}" is not a known coordinate system, so this map will match no query`);
 	}
 
 	const id = typeof fm[KEY.id] === "string" ? (fm[KEY.id] as string).trim() : "";

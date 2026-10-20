@@ -126,6 +126,10 @@ export class FakeVault implements VaultPort {
 		return b === undefined ? Promise.reject(new Error(`no such file: ${path}`)) : Promise.resolve(b);
 	}
 
+	listNotes(): readonly string[] {
+		return [...this.notes.keys()];
+	}
+
 	listGeorefNotes(): readonly string[] {
 		return [...this.notes.entries()].filter(([, fm]) => looksLikeGeoref(fm)).map(([p]) => p);
 	}

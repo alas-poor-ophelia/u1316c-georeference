@@ -91,6 +91,14 @@ export interface VaultPort {
 	/** Paths of every note holding a Geb georeference. */
 	listGeorefNotes(): readonly string[];
 	/**
+	 * Paths of every markdown note in the vault.
+	 *
+	 * Needed to find place notes, which are ordinary notes carrying coordinates and so cannot be
+	 * identified by a Geb-specific key. Frontmatter is already in Obsidian's metadata cache, so
+	 * scanning it is a walk over memory rather than disk reads.
+	 */
+	listNotes(): readonly string[];
+	/**
 	 * Every file that could be a georeferenceable image, with its size.
 	 *
 	 * The size is the point. Reconciliation re-finds a lost image by matching the stored content
