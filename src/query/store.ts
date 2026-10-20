@@ -6,16 +6,18 @@
  * report and for us to diagnose. Problems carry a code and a note path rather than prose with the
  * path baked into it, so a UI can link to the note and sort by severity without parsing text.
  */
-import { buildFit } from "../core/fit";
+import { buildFit, type Fit } from "../core/fit";
 import { fromFrontmatter, looksLikeGeoref } from "../persist/serialize";
 import type { VaultPort } from "../persist/types";
 import { readFeature } from "./features";
+import { fitKey, type FitMemo } from "./fit-memo";
 import type { Feature, LoadedGeoref, Problem, RejectedGeoref, WorldIndex } from "./types";
 
 function loadGeoref(
 	port: VaultPort,
 	notePath: string,
 	problems: Problem[],
+	memo: FitMemo | undefined,
 ): LoadedGeoref | RejectedGeoref {
 	const parsed = fromFrontmatter(port.readFrontmatter(notePath));
 	if (parsed.value === null) {
@@ -62,13 +64,14 @@ function loadGeoref(
 	}
 
 	try {
-		const fit = buildFit(
-			first.points,
+		const opts =
 			first.transform.lambda === undefined
 				? { kind: first.transform.model }
-				: { kind: first.transform.model, lambda: first.transform.lambda },
-			first.bounds,
-		);
+				: { kind: first.transform.model, lambda: first.transform.lambda };
+		const build = (): Fit => buildFit(first.points, opts, first.bounds);
+		// With no memo this is exactly the call it replaced — the degenerate case is the default,
+		// so passing nothing leaves behaviour identical to before the memo existed.
+		const fit = memo === undefined ? build() : memo.reuse(fitKey(first, record.crs), build);
 		return { notePath, record, size: { width, height }, fit };
 	} catch (e) {
 		// Degenerate control points throw rather than returning garbage. That is the kernel doing
@@ -91,14 +94,14 @@ const isLoaded = (g: LoadedGeoref | RejectedGeoref): g is LoadedGeoref => "fit" 
  * event-driven or per-user-action rebuild, and not for a per-frame or per-keystroke one — see the
  * note in types.ts. Who triggers a rebuild is a phase-4 decision, deliberately not guessed here.
  */
-export function buildIndex(port: VaultPort): WorldIndex {
+export function buildIndex(port: VaultPort, memo?: FitMemo): WorldIndex {
 	const problems: Problem[] = [];
 	const georefs: LoadedGeoref[] = [];
 	const rejected: RejectedGeoref[] = [];
 	const seenIds = new Map<string, string>();
 
 	for (const notePath of port.listGeorefNotes()) {
-		const result = loadGeoref(port, notePath, problems);
+		const result = loadGeoref(port, notePath, problems, memo);
 		if (!isLoaded(result)) {
 			rejected.push(result);
 			continue;
@@ -137,5 +140,9 @@ export function buildIndex(port: VaultPort): WorldIndex {
 		if (f !== null) features.push(f);
 	}
 
+	// Swept at the END of the build, so an entry survives only if THIS build reused it. A
+	// user dragging one control point mints a new key per drag, and the superseded fits are
+	// unreachable forever after — unbounded, that leaks a dense solve apiece.
+	memo?.sweep();
 	return { georefs, features, rejected, problems };
 }

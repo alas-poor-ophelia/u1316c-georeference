@@ -11,6 +11,7 @@ import { ApiController } from "../src/api/controller";
 import type { GebErrorCode } from "../src/api/errors";
 import { MIN_POINTS, type ControlPoint } from "../src/core/types";
 import { hashBytes } from "../src/persist/identity";
+import { FitMemo } from "../src/query/fit-memo";
 import { toFrontmatter } from "../src/persist/serialize";
 import { KEY, type Georeference } from "../src/persist/types";
 import { CLEAN, IMAGE } from "./fixtures";
@@ -524,5 +525,49 @@ describe("events", () => {
 		});
 		c.unload();
 		expect(heard).toBe(true);
+	});
+});
+
+describe("the API reuses solved fits across calls", () => {
+	test("repeated queries solve once, and a write forces a resolve", async () => {
+		// Asserted by MECHANISM — the solve count — not by timing. A stopwatch assertion would be
+		// flaky on a loaded machine, and the thing that matters is that the dense solve does not
+		// happen again, which is exactly what the counters say.
+		const memo = new FitMemo();
+		const own = new ApiController(v, VERSION, memo);
+		addGeoref(georef("britain-5c"));
+		v.addNote("places/Eboracum.md", { lat: YORK.lat, lng: YORK.lng });
+		own.markReady();
+
+		own.api.listGeorefs();
+		expect(memo.misses).toBe(1);
+		expect(memo.hits).toBe(0);
+
+		// Four more vault queries, each of which builds a fresh index — and none of which re-solves.
+		own.api.listGeorefs();
+		own.api.georefsCovering(YORK.lat, YORK.lng);
+		own.api.featuresIn("britain-5c");
+		own.api.getFit("britain-5c");
+		expect(memo.misses).toBe(1);
+		expect(memo.hits).toBe(4);
+
+		// A write changes the content, so the key changes and the fit is solved again — once.
+		await own.api.addPoint("britain-5c", { px: 5, py: 6, lat: 52.2, lng: 0.12 });
+		own.api.listGeorefs();
+		expect(memo.misses).toBe(2);
+		// And the superseded solve is gone rather than hoarded.
+		expect(memo.size).toBe(1);
+	});
+
+	test("unload drops the solved fits", () => {
+		const memo = new FitMemo();
+		const own = new ApiController(v, VERSION, memo);
+		addGeoref(georef("britain-5c"));
+		own.markReady();
+		own.api.listGeorefs();
+		expect(memo.size).toBe(1);
+
+		own.unload();
+		expect(memo.size).toBe(0);
 	});
 });

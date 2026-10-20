@@ -4,14 +4,27 @@
  * Same fence as the kernel and the persistence layer — no Obsidian imports. Everything comes
  * through `VaultPort`.
  *
- * NO CACHING, and the numbers say that is affordable — but quote them in full, because the short
- * version of this paragraph understated its own measurements and the phase-4 decision reads it.
+ * THE INDEX IS NOT CACHED; the FITS INSIDE IT ARE, keyed on content. Quote the numbers in full,
+ * because the short version of this paragraph understated its own measurements and the phase-4
+ * decision reads it.
  *
  *   build: 50,000 notes with 10,000 carrying coordinates   7–13 ms
- *   build: 50 spline georeferences, 30 points each         29 ms
- *   build: ONE spline georeference of 300 points           214 ms   <- the worst case
+ *   build: 50 spline georeferences, 30 points each         83 ms cold, 5 ms warm
+ *   build: ONE spline georeference of 300 points           175 ms cold, 1 ms warm  <- worst case
  *   query: georefsCovering across twenty maps              0.06 ms
  *   query: featuresIn across 4,000 features                4.5 ms
+ *
+ * "Warm" is a rebuild in which nothing changed, so every fit comes from the memo in
+ * src/query/fit-memo.ts. The memo cannot go stale, because its key IS the content of the parsed
+ * record — there is no invalidation step to forget. Absolute figures are machine-dependent
+ * (measured 2026-10-20 on one dev box) and have been quoted three inconsistent ways in this repo
+ * already; the stable claims are the RATIOS.
+ *
+ * THE CASE THE MEMO CANNOT HELP, and it is the interactive one: a user dragging a control point
+ * changes the content on every frame, so the key changes and the spline is re-solved — 171 ms per
+ * drag on the 300-point case. That is why the API hands a view `previewFit` over its own
+ * in-progress points, and why the draft lives in the view rather than being committed per
+ * placement. Routing a drag through the vault is the pathology; it was never an indexing problem.
  *
  * So "queries afterwards are negligible" is true of `georefsCovering` and seventy-five times
  * wrong about `featuresIn`. What this does NOT survive is a rebuild per render frame, per

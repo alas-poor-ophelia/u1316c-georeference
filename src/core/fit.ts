@@ -100,10 +100,13 @@ export function buildFit(
 
 	// Diagnostics are computed on first access, not at fit time, and then memoised.
 	//
-	// Measured: for a 300-point spline, `buildFit` cost 268ms of which `diagnose` was 89ms —
-	// an affine fit plus a leave-one-out matrix inversion. The coverage layer builds a fit for
-	// every georeference in the vault and never reads diagnostics at all, so that was a third of
-	// the index build spent on numbers nobody looked at. A getter keeps the interface identical.
+	// Measured 2026-10-20 on one dev box, 300-point spline: 189 ms to fit, a further 110 ms on
+	// the first read of `diagnostics` — an affine fit plus a leave-one-out matrix inversion. The
+	// absolute numbers are machine-dependent and have been quoted three different ways in this
+	// repo; the STABLE claim is the ratio. Diagnosing costs roughly as much again as fitting, and
+	// the coverage layer builds a fit for every georeference in the vault while never reading
+	// diagnostics at all — so eagerly diagnosing spent about a third of the index build on numbers
+	// nobody looked at. A getter keeps the interface identical.
 	let cached: Diagnostics | null = null;
 
 	return {

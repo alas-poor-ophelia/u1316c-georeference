@@ -37,6 +37,7 @@ import { toFrontmatter } from "../persist/serialize";
 import { KEY, type Georeference, type ParseResult, type StoredFit, type VaultPort } from "../persist/types";
 import { createAndCapture, writeAndCapture } from "../persist/write";
 import { featuresIn, georefsCovering } from "../query/coverage";
+import { FitMemo } from "../query/fit-memo";
 import { buildIndex } from "../query/store";
 import type { LoadedGeoref, WorldIndex } from "../query/types";
 import { codedError } from "./errors";
@@ -120,6 +121,11 @@ export class ApiController {
 	constructor(
 		private readonly port: VaultPort,
 		private readonly pluginVersion: string,
+		/**
+		 * Content-keyed memo for fitted transforms. Injectable so a test can read its solve
+		 * counters and prove reuse by MECHANISM rather than by timing a stopwatch.
+		 */
+		private readonly fits: FitMemo = new FitMemo(),
 	) {
 		this.built = this.build();
 		this.api = this.built;
@@ -136,6 +142,9 @@ export class ApiController {
 		this.alive = false;
 		this.built.ready = false;
 		this.listeners.clear();
+		// A memoised fit for a 300-point spline holds that spline's solved matrix; there is no
+		// reason to keep one alive after the plugin is gone.
+		this.fits.clear();
 	}
 
 	private assertLive(): void {
@@ -152,7 +161,7 @@ export class ApiController {
 				"The vault has not finished indexing. Wait for geb:ready — an empty answer now would be wrong rather than empty.",
 			);
 		}
-		return buildIndex(this.port);
+		return buildIndex(this.port, this.fits);
 	}
 
 	private emit(type: GebEvent): void {
