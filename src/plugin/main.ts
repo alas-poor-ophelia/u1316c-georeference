@@ -1,4 +1,6 @@
 import { Notice, Plugin, type EventRef } from "obsidian";
+import { ApiController } from "../api/controller";
+import type { GebAPI } from "../api/types";
 import { reconcile, type ReconcileOutcome } from "../persist/reconcile";
 import { handleRename } from "../persist/rename";
 import type { VaultPort } from "../persist/types";
@@ -14,10 +16,22 @@ export default class GebPlugin extends Plugin {
 	private vault: VaultPort | null = null;
 	/** Checked between notes so an in-flight handler stops writing once the plugin is gone. */
 	private alive = false;
+	private controller: ApiController | null = null;
+
+	/**
+	 * The public surface, reachable as `app.plugins.plugins.geb.api`.
+	 *
+	 * Present from `onload`, but `api.ready` stays false until Obsidian has indexed the vault —
+	 * every vault-backed method throws `geb-not-ready` until then, because an empty answer read
+	 * off a half-built metadata cache would be a confident lie. Consumers wait for `geb:ready`.
+	 */
+	api: GebAPI | null = null;
 
 	override onload(): void {
 		this.vault = new ObsidianVault(this.app);
 		this.alive = true;
+		this.controller = new ApiController(this.vault, this.manifest.version);
+		this.api = this.controller.api;
 
 		// Geb owns rename handling outright: the metadata cache's `changed` event explicitly does
 		// not fire on rename, so this is the only notification there is.
@@ -36,14 +50,31 @@ export default class GebPlugin extends Plugin {
 			const holder: { ref: EventRef | null } = { ref: null };
 			holder.ref = this.app.metadataCache.on("resolved", () => {
 				if (holder.ref !== null) this.app.metadataCache.offref(holder.ref);
+				// READY IS DECLARED HERE AND NOWHERE ELSE. `resolved` is the only signal that the
+				// metadata cache is fully built, and every vault-backed API method refuses until
+				// it has fired — this is the same "the vault was still indexing" hazard
+				// reconciliation already handles, arriving in the query layer.
+				this.controller?.markReady();
+				this.app.workspace.trigger("geb:ready");
 				void this.runReconcile();
 			});
 			this.registerEvent(holder.ref);
 		});
 	}
 
+	/**
+	 * The API's own `unload` event fires FIRST, then the workspace event.
+	 *
+	 * A consumer holding the api object hears directly before the broadcast, so it can drop its
+	 * reference before anything else reacts. After this every method throws `geb-unloaded`, which
+	 * is what a consumer needs instead of an empty answer from a dead plugin.
+	 */
 	override onunload(): void {
 		this.alive = false;
+		this.controller?.unload();
+		this.app.workspace.trigger("geb:unload");
+		this.controller = null;
+		this.api = null;
 		this.vault = null;
 	}
 

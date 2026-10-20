@@ -51,15 +51,17 @@ export default tseslint.config(
 		},
 	},
 	{
-		// src/persist and src/query hold the same property for a harder case: they are ABOUT the
-		// vault, and still never import it. Everything they need is behind VaultPort, which the
-		// plugin layer implements and the tests fake — so rename behaviour and coverage queries
-		// are testable without an app.
-		files: ["src/persist/**/*.ts", "src/query/**/*.ts"],
+		// src/persist, src/query and src/api hold the same property for a harder case: they are
+		// ABOUT the vault, and still never import it. Everything they need is behind VaultPort,
+		// which the plugin layer implements and the tests fake — so rename behaviour, coverage
+		// queries and the whole public API are driven by a fake without launching anything.
+		// src/api is in here deliberately: an API that reached for `app` directly could not be
+		// behaviourally tested, and the phase-4 gate requires exactly that.
+		files: ["src/persist/**/*.ts", "src/query/**/*.ts", "src/api/**/*.ts"],
 		rules: {
 			"no-restricted-imports": [
 				"error",
-				{ patterns: [{ group: ["obsidian", "../plugin/*", "../plugin/**"], message: "src/persist and src/query reach the vault only through VaultPort." }] },
+				{ patterns: [{ group: ["obsidian", "../plugin/*", "../plugin/**"], message: "src/persist, src/query and src/api reach the vault only through VaultPort." }] },
 			],
 		},
 	},
