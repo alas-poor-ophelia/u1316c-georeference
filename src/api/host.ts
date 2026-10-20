@@ -8,11 +8,18 @@
  * Geb reads through Obsidian's metadata cache and writes through its frontmatter processor, and
  * nothing orders those two against each other. So if a write marked the index dirty, the next
  * query would rebuild from a cache that still holds the PRE-write frontmatter, publish it as
- * current, and clear the flag — deterministically, on the first write a UI ever makes. The user's
- * control point would appear to vanish and return one unrelated event later. Instead: writes
- * return the record they wrote (src/persist/write.ts), and the index catches up when the cache
- * does. The consequence is explicit in API.md: for a moment after your own write, the index still
- * describes the previous state. Use the returned record.
+ * current, and clear the flag. The user's control point would appear to vanish and return one
+ * unrelated event later.
+ *
+ * MEASURED, not inferred: in a live vault on Obsidian 1.14.4, six identical runs, the cache
+ * returns the pre-write value at the instant the write resolves — every time, within a window of
+ * a few milliseconds. `changed` does then fire for that note carrying the new frontmatter, which
+ * is what makes invalidating on the EVENT correct and invalidating on the write wrong. (It does
+ * not fire on rename, which is why `Vault.on('rename')` is hooked separately.)
+ *
+ * So: writes return the record they wrote (src/persist/write.ts), and the index catches up when
+ * the cache does. The consequence is explicit in API.md — for a moment after your own write, the
+ * index still describes the previous state. Use the returned record.
  *
  * NO TIMER IN HERE. `flush()` is explicit, and the plugin layer debounces it, because src/api is
  * fenced against Obsidian precisely so the whole surface can be driven by a fake. A timer here
