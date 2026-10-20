@@ -11,7 +11,7 @@ import { ApiController } from "../src/api/controller";
 import type { GebErrorCode } from "../src/api/errors";
 import { MIN_POINTS, type ControlPoint } from "../src/core/types";
 import { hashBytes } from "../src/persist/identity";
-import { FitMemo } from "../src/query/fit-memo";
+import { IndexHost } from "../src/api/host";
 import { toFrontmatter } from "../src/persist/serialize";
 import { KEY, type Georeference } from "../src/persist/types";
 import { CLEAN, IMAGE } from "./fixtures";
@@ -341,6 +341,13 @@ describe("writing", () => {
 		v.lagReads = true;
 	});
 
+	/** What Obsidian's metadata cache catching up and firing `changed` amounts to. */
+	const vaultNoticed = (path: string): void => {
+		v.settleCache();
+		c.host.invalidate(path);
+		c.flush();
+	};
+
 	test("addPoint returns the record it wrote, while the cache is still behind", async () => {
 		const before = c.api.getGeoref("britain-5c")!.pointCount;
 		const summary = await c.api.addPoint("britain-5c", { px: 5, py: 6, lat: 52.2, lng: 0.12, label: "Camboricum" });
@@ -349,7 +356,26 @@ describe("writing", () => {
 		// Proof the guarantee was needed: a re-reading implementation would have seen `before`.
 		const cached = v.readFrontmatter("maps/britain-5c.md") as Record<string, unknown>;
 		expect((cached[KEY.fits] as { points: unknown[] }[])[0]!.points).toHaveLength(before);
-		v.settleCache();
+
+		vaultNoticed("maps/britain-5c.md");
+		expect(c.api.getGeoref("britain-5c")!.pointCount).toBe(before + 1);
+	});
+
+	test("A WRITE DOES NOT INVALIDATE THE INDEX, and that is the point", async () => {
+		// The load-bearing rule of the whole design. If a write marked the index dirty, the next
+		// query would rebuild from a metadata cache that still holds the PRE-write frontmatter,
+		// publish it as current and clear the flag — deterministically, on the first write a UI
+		// makes. So the index deliberately keeps describing the previous state until the vault
+		// says otherwise, and the caller uses the record the write returned.
+		const before = c.api.getGeoref("britain-5c")!.pointCount;
+		const summary = await c.api.addPoint("britain-5c", { px: 5, py: 6, lat: 52.2, lng: 0.12 });
+
+		expect(c.host.isDirty).toBe(false);
+		expect(summary.pointCount).toBe(before + 1);
+		// The index still says `before` — not stale by accident, stale ON PURPOSE and documented.
+		expect(c.api.getGeoref("britain-5c")!.pointCount).toBe(before);
+
+		vaultNoticed("maps/britain-5c.md");
 		expect(c.api.getGeoref("britain-5c")!.pointCount).toBe(before + 1);
 	});
 
@@ -357,7 +383,7 @@ describe("writing", () => {
 		const moved: ControlPoint = { px: 1, py: 2, lat: 54, lng: -1, label: "moved" };
 		const summary = await c.api.updatePoint("britain-5c", 0, moved);
 		expect(summary.pointCount).toBe(CLEAN.length);
-		v.settleCache();
+		vaultNoticed("maps/britain-5c.md");
 		expect(c.api.getFit("britain-5c").points[0]).toEqual(moved);
 	});
 
@@ -389,7 +415,7 @@ describe("writing", () => {
 	test("updateGeoref patches the crs and the model", async () => {
 		const summary = await c.api.updateGeoref("britain-5c", { model: "affine" });
 		expect(summary.model).toBe("affine");
-		v.settleCache();
+		vaultNoticed("maps/britain-5c.md");
 		expect(c.api.getGeoref("britain-5c")!.model).toBe("affine");
 	});
 
@@ -454,9 +480,16 @@ describe("writing", () => {
 
 		await c.api.addPoint("britain-5c", { px: 5, py: 6, lat: 52.2, lng: 0.12 });
 		expect(c.api.generation).toBe(start + 1);
-		v.settleCache();
-		await c.api.removePoint("britain-5c", 0);
-		expect(c.api.generation).toBe(start + 2);
+		vaultNoticed("maps/britain-5c.md");
+		// The rebuild found a real change, so it moves too — both sources count.
+		expect(c.api.generation).toBeGreaterThan(start + 1);
+
+		// A flush that found NOTHING must not move it: a body edit leaving frontmatter alone is
+		// silence, not noise, or a consumer caching on generation re-reads forever.
+		const quiet = c.api.generation;
+		c.host.invalidate("maps/britain-5c.md");
+		c.flush();
+		expect(c.api.generation).toBe(quiet);
 	});
 });
 
@@ -533,35 +566,45 @@ describe("the API reuses solved fits across calls", () => {
 		// Asserted by MECHANISM — the solve count — not by timing. A stopwatch assertion would be
 		// flaky on a loaded machine, and the thing that matters is that the dense solve does not
 		// happen again, which is exactly what the counters say.
-		const memo = new FitMemo();
-		const own = new ApiController(v, VERSION, memo);
+		const host = new IndexHost(v);
+		const memo = host.memo;
+		const own = new ApiController(v, VERSION, host);
 		addGeoref(georef("britain-5c"));
 		v.addNote("places/Eboracum.md", { lat: YORK.lat, lng: YORK.lng });
 		own.markReady();
 
 		own.api.listGeorefs();
 		expect(memo.misses).toBe(1);
-		expect(memo.hits).toBe(0);
 
-		// Four more vault queries, each of which builds a fresh index — and none of which re-solves.
+		// Four more queries. The INDEX is cached now too, so these do not even rebuild — which is
+		// a bigger win than step 2 alone and the reason `hits` stays at zero rather than climbing.
 		own.api.listGeorefs();
 		own.api.georefsCovering(YORK.lat, YORK.lng);
 		own.api.featuresIn("britain-5c");
 		own.api.getFit("britain-5c");
 		expect(memo.misses).toBe(1);
-		expect(memo.hits).toBe(4);
+		expect(memo.hits).toBe(0);
 
-		// A write changes the content, so the key changes and the fit is solved again — once.
+		// A rebuild in which nothing moved: the index is rebuilt, the fit is REUSED.
+		own.host.invalidate("maps/britain-5c.md");
+		own.flush();
+		expect(memo.misses).toBe(1);
+		expect(memo.hits).toBe(1);
+
+		// Now a real change: the content moved, so the key moved, so it solves again — once.
 		await own.api.addPoint("britain-5c", { px: 5, py: 6, lat: 52.2, lng: 0.12 });
-		own.api.listGeorefs();
+		v.settleCache();
+		own.host.invalidate("maps/britain-5c.md");
+		own.flush();
 		expect(memo.misses).toBe(2);
 		// And the superseded solve is gone rather than hoarded.
 		expect(memo.size).toBe(1);
 	});
 
 	test("unload drops the solved fits", () => {
-		const memo = new FitMemo();
-		const own = new ApiController(v, VERSION, memo);
+		const host = new IndexHost(v);
+		const memo = host.memo;
+		const own = new ApiController(v, VERSION, host);
 		addGeoref(georef("britain-5c"));
 		own.markReady();
 		own.api.listGeorefs();
@@ -569,5 +612,68 @@ describe("the API reuses solved fits across calls", () => {
 
 		own.unload();
 		expect(memo.size).toBe(0);
+	});
+});
+
+describe("the change events reach a subscriber", () => {
+	test("a flush that found something emits, with the paths and the generation", () => {
+		addGeoref(georef("britain-5c"));
+		c.markReady();
+		const seen: { type: string; paths: readonly string[]; generation: number }[] = [];
+		for (const e of ["georefs-changed", "fit-changed", "features-changed"] as const) {
+			c.api.on(e, (p) => seen.push({ type: p.type, paths: p.paths, generation: p.generation }));
+		}
+		c.api.listGeorefs();
+
+		v.addNote("places/Eboracum.md", { lat: YORK.lat, lng: YORK.lng });
+		c.host.invalidate("places/Eboracum.md");
+		c.flush();
+
+		expect(seen.map((s) => s.type)).toEqual(["features-changed"]);
+		expect(seen[0]!.paths).toEqual(["places/Eboracum.md"]);
+		expect(seen[0]!.generation).toBe(c.api.generation);
+		expect(Object.isFrozen(seen[0]!.paths)).toBe(true);
+	});
+
+	test("a flush that found nothing emits nothing", () => {
+		// Obsidian fires `changed` on body edits with identical frontmatter. Without the
+		// fingerprint diff, typing in a map note would wake every consumer on every keystroke.
+		addGeoref(georef("britain-5c"));
+		c.markReady();
+		let fired = 0;
+		for (const e of ["georefs-changed", "fit-changed", "features-changed"] as const) {
+			c.api.on(e, () => {
+				fired += 1;
+			});
+		}
+		c.api.listGeorefs();
+		c.host.invalidate("maps/britain-5c.md");
+		c.flush();
+		expect(fired).toBe(0);
+	});
+
+	test("flushing before ready, or after unload, does nothing", () => {
+		addGeoref(georef("britain-5c"));
+		expect(c.flush()).toBeNull();
+		c.markReady();
+		c.api.listGeorefs();
+		c.unload();
+		expect(c.flush()).toBeNull();
+	});
+
+	test("getImageInfo reports what reconciliation found, and unknown until it has", () => {
+		addGeoref(georef("britain-5c"));
+		c.markReady();
+		expect(c.api.getImageInfo("britain-5c").staleness).toBe("unknown");
+
+		c.recordStaleness("maps/britain-5c.md", "changed");
+		expect(c.api.getImageInfo("britain-5c").staleness).toBe("changed");
+
+		// Unload forgets it: a staleness verdict from a previous session's reconcile is not
+		// evidence about this one.
+		c.unload();
+		const again = new ApiController(v, VERSION);
+		again.markReady();
+		expect(again.api.getImageInfo("britain-5c").staleness).toBe("unknown");
 	});
 });

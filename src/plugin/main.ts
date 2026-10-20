@@ -1,4 +1,4 @@
-import { Notice, Plugin, type EventRef } from "obsidian";
+import { debounce, Notice, Plugin, TFile, type Debouncer, type EventRef } from "obsidian";
 import { ApiController } from "../api/controller";
 import type { GebAPI } from "../api/types";
 import { reconcile, type ReconcileOutcome } from "../persist/reconcile";
@@ -17,6 +17,15 @@ export default class GebPlugin extends Plugin {
 	/** Checked between notes so an in-flight handler stops writing once the plugin is gone. */
 	private alive = false;
 	private controller: ApiController | null = null;
+	/**
+	 * The debounce that decides when EVENTS fire — never whether an answer is current.
+	 *
+	 * A query against a dirty index rebuilds synchronously, so this timer can never starve a
+	 * caller. It exists because Obsidian fires `changed` per note during a sync burst, and waking
+	 * every consumer per note would be the pathology the architecture call warned about. 150 ms is
+	 * long enough to coalesce a burst and short enough that a single edit feels immediate.
+	 */
+	private flushSoon: Debouncer<[], void> | null = null;
 
 	/**
 	 * The public surface, reachable as `app.plugins.plugins.geb.api`.
@@ -56,6 +65,10 @@ export default class GebPlugin extends Plugin {
 				// reconciliation already handles, arriving in the query layer.
 				this.controller?.markReady();
 				this.app.workspace.trigger("geb:ready");
+				// REGISTERED ONLY NOW, after the cache has resolved. Obsidian fires `changed` once
+				// per file while indexing — 50,000 of them on a large vault — and every one would
+				// be an invalidation of an index the first build is about to make anyway.
+				this.watchVault();
 				void this.runReconcile();
 			});
 			this.registerEvent(holder.ref);
@@ -71,6 +84,9 @@ export default class GebPlugin extends Plugin {
 	 */
 	override onunload(): void {
 		this.alive = false;
+		// Cancelled before the controller goes, or a pending flush fires into a dead API.
+		this.flushSoon?.cancel();
+		this.flushSoon = null;
 		this.controller?.unload();
 		this.app.workspace.trigger("geb:unload");
 		this.controller = null;
@@ -112,6 +128,16 @@ export default class GebPlugin extends Plugin {
 	}
 
 	private report(out: readonly ReconcileOutcome[]): void {
+		// RECORDED, not just printed. `getImageInfo().staleness` promised a value that nothing
+		// computed, while every outcome needed to compute it was worked out here and dropped to
+		// the console. Only the three outcomes that actually compared the image's bytes say
+		// anything about staleness; the rest leave it at "not checked", which reports as
+		// "unknown" rather than being defaulted to "same".
+		for (const o of out) {
+			if (o.action === "ok" || o.action === "relinked") this.controller?.recordStaleness(o.notePath, "same");
+			else if (o.action === "stale") this.controller?.recordStaleness(o.notePath, "changed");
+		}
+
 		const relinked = out.filter((o) => o.action === "relinked");
 		const attention = out.filter((o) => o.action !== "ok" && o.action !== "relinked");
 		for (const o of [...relinked, ...attention]) {
@@ -123,5 +149,39 @@ export default class GebPlugin extends Plugin {
 		if (attention.length > 0) {
 			new Notice(`${DISPLAY_NAME}: ${attention.length} georeference(s) need attention. See the console.`);
 		}
+	}
+
+	/**
+	 * Hook every notification that means the vault moved — and NOTHING that means Geb wrote.
+	 *
+	 * That asymmetry is the load-bearing rule of the index design. Geb reads through the metadata
+	 * cache and writes through the frontmatter processor, with nothing ordering the two, so
+	 * invalidating on a write's completion would rebuild from a cache still holding the pre-write
+	 * frontmatter and publish it as current. The index catches up when `changed` says so.
+	 *
+	 * `metadataCache.on('changed')` deliberately does NOT fire on rename, which is why the vault's
+	 * own rename event is hooked separately — and both the old and new path are invalidated,
+	 * because the fingerprint diff needs to see one disappear and the other appear.
+	 */
+	private watchVault(): void {
+		const touch = (path?: string): void => {
+			this.controller?.host.invalidate(path);
+			this.flushSoon?.();
+		};
+		this.flushSoon = debounce(() => {
+			this.controller?.flush();
+		}, 150, true);
+
+		this.registerEvent(this.app.metadataCache.on("changed", (file) => touch(file.path)));
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				touch(oldPath);
+				touch(file.path);
+			}),
+		);
+		// A folder create or delete moves many notes at once and names only the folder, so the
+		// honest response is "somewhere" — a full diff rather than a scoped one that misses them.
+		this.registerEvent(this.app.vault.on("create", (file) => touch(file instanceof TFile ? file.path : undefined)));
+		this.registerEvent(this.app.vault.on("delete", (file) => touch(file instanceof TFile ? file.path : undefined)));
 	}
 }

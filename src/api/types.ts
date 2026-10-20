@@ -173,12 +173,19 @@ export interface UpdateGeorefPatch {
 	readonly points?: readonly ControlPoint[];
 }
 
-export type GebEvent = "ready" | "unload";
+export type GebEvent = "ready" | "unload" | "georefs-changed" | "fit-changed" | "features-changed";
 
-/** Frozen on emission, including any array inside it. *(API 1)* */
+/**
+ * Frozen on emission, including the array inside it. *(API 1)*
+ *
+ * `paths` carries the note paths that actually moved, so a consumer can re-read ONE map rather
+ * than re-enumerating the vault. It is empty for `ready` and `unload`, and empty for a change
+ * whose originating signal did not say where — Obsidian's batch-settled `resolved` names no file.
+ */
 export interface GebEventPayload {
 	readonly type: GebEvent;
 	readonly generation: number;
+	readonly paths: readonly string[];
 }
 
 export interface GebAPI {
@@ -190,9 +197,9 @@ export interface GebAPI {
 	/**
 	 * A monotonic counter that moves whenever Geb's view of the world may have changed. *(API 1)*
 	 *
-	 * In this version only Geb's own writes move it, because nothing is cached and every query
-	 * reads the vault fresh. It exists now so a consumer caching results has something to compare,
-	 * and so the later indexed version has no new concept to introduce.
+	 * It moves when a rebuild found something different, and when Geb writes. It does NOT move
+	 * for a rebuild that changed nothing, so a consumer can use it as a cheap "may I keep what I
+	 * have" check.
 	 */
 	readonly generation: number;
 
@@ -233,6 +240,14 @@ export interface GebAPI {
 	updatePoint(georefId: string, index: number, point: ControlPoint): Promise<GeorefSummary>;
 	removePoint(georefId: string, index: number): Promise<GeorefSummary>;
 
-	/** Returns an unsubscribe function that runs at most once. *(API 1)* */
+	/**
+	 * Returns an unsubscribe function that runs at most once. *(API 1)*
+	 *
+	 * `georefs-changed` fires when the set of usable maps moves — one appearing, vanishing, or
+	 * crossing between loaded and REJECTED. `fit-changed` is narrower: an existing map whose
+	 * transform moved. `features-changed` fires when a place note's coordinates or fields move.
+	 * A consumer watching only `fit-changed` will not learn that a map became unusable, which is
+	 * why the first exists.
+	 */
 	on(event: GebEvent, cb: (payload: GebEventPayload) => void): () => void;
 }

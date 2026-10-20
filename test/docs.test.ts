@@ -69,6 +69,17 @@ describe("API.md cannot drift from the surface", () => {
 		expect(firstColumn(section("error-codes")).sort()).toEqual([...new Set(codes)].sort());
 	});
 
+	test("every event is documented, and no invented ones are", async () => {
+		// Read off the GebEvent union in source, same discipline as the error codes: the union is
+		// the truth and a second hand-written list here would be the drift this test exists to
+		// catch. The doc claimed the change events were NOT in API 1 until the moment they were.
+		const source = await Bun.file(`${ROOT}/src/api/types.ts`).text();
+		const union = source.slice(source.indexOf("export type GebEvent"), source.indexOf("export interface GebEventPayload"));
+		const events = [...union.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!);
+		expect(events.length).toBe(5);
+		expect(firstColumn(section("events")).sort()).toEqual([...events].sort());
+	});
+
 	test("the worked example still produces what the doc says it does", () => {
 		// The pin that catches a changed RESULT rather than a changed name.
 		const bytes = new Uint8Array([1, 2, 3, 4]).buffer;
@@ -86,7 +97,10 @@ describe("API.md cannot drift from the surface", () => {
 		const c = new ApiController(v, "0.0.1");
 		c.markReady();
 
-		const json = /```json\n([\s\S]*?)```/.exec(section("example"));
+		// `\r?\n`, because the working tree's line endings are not ours to assume. This repo has
+		// `core.autocrlf=true`, so git stores LF and checks out CRLF on Windows — a test that
+		// hard-codes `\n` passes on a Linux runner and fails on the machine it was written on.
+		const json = /```json\r?\n([\s\S]*?)```/.exec(section("example"));
 		expect(json).not.toBeNull();
 		const promised: unknown = JSON.parse(json![1]!);
 

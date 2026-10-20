@@ -229,12 +229,19 @@ export interface UpdateGeorefPatch {
 }
 
 /** *(API 1)* */
-export type GebEvent = "ready" | "unload";
+export type GebEvent = "ready" | "unload" | "georefs-changed" | "fit-changed" | "features-changed";
 
-/** Frozen on emission. *(API 1)* */
+/**
+ * Frozen on emission, including the array inside it. *(API 1)*
+ *
+ * `paths` carries the note paths that actually moved, so a consumer can re-read ONE map rather
+ * than re-enumerating the vault. Empty for `ready` and `unload`, and empty for a change whose
+ * originating signal did not say where.
+ */
 export interface GebEventPayload {
 	readonly type: GebEvent;
 	readonly generation: number;
+	readonly paths: readonly string[];
 }
 
 export interface GebAPI {

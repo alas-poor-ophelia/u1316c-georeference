@@ -88,6 +88,47 @@ Errors are `Error` objects with a `code` property, so you can branch without mat
 | `on` | method | Subscribe to `ready` or `unload`. Returns an unsubscribe that runs at most once. *(API 1)* |
 <!-- /geb:methods -->
 
+## Events
+
+<!-- geb:events -->
+| event | fires when |
+|---|---|
+| `ready` | The vault is indexed and the API is usable. |
+| `unload` | Geb is going away. Drop your reference. |
+| `georefs-changed` | The set of usable maps moved — one appeared, vanished, or crossed between loaded and **rejected**. |
+| `fit-changed` | An existing map's transform moved, so pin positions must be recomputed. |
+| `features-changed` | A place note's coordinates or fields moved. |
+<!-- /geb:events -->
+
+Every payload is frozen and carries `{ type, generation, paths }`. **`paths` names the notes that
+actually moved**, so you can re-read one map rather than re-enumerating the vault; it is empty for
+`ready` and `unload`, and empty when the originating signal did not say where.
+
+A consumer watching only `fit-changed` will never learn that a map became unusable. That is what
+`georefs-changed` is for, and why it fires on a rejection as well as on a disappearance.
+
+**An edit that changes nothing fires nothing.** Obsidian's `changed` event fires on body edits with
+identical frontmatter, so Geb fingerprints every note's georeference and feature content and only
+emits where a fingerprint actually moved. Typing in a map note does not wake you.
+
+## The consistency contract
+
+Read this once; it explains two behaviours that look like bugs.
+
+**The index mirrors Obsidian's metadata cache, not the disk.** Everything Geb reads comes from
+`metadataCache`, so Geb is exactly as current as Obsidian is.
+
+**A query is never stale, but two queries may straddle a change.** Every query returns a snapshot
+built synchronously — if the vault moved since the last one, it rebuilds before answering, so no
+single call can observe a half-updated world. Two separate calls can land either side of a
+rebuild: `getGeoref(id)` can succeed and `featuresIn(id)` then return `null` for the same id.
+`generation` is how you detect that. It moves when a rebuild found something different and when
+Geb writes, and it does **not** move for a rebuild that changed nothing — so it is a safe "may I
+keep what I have" check.
+
+**For a moment after your own write, the index still describes the previous state.** This is
+deliberate. See below.
+
 ## Two things that will surprise you, and why
 
 **`previewFit` is how you build interactively.** It fits points you hand it, with no vault
@@ -102,6 +143,12 @@ and not a re-read. Geb reads through Obsidian's metadata cache and writes throug
 processor, and nothing orders those two against each other — so a re-read immediately after a
 write can return the *pre-write* state. Use the returned record; do not call `getGeoref` to see
 what your own write did.
+
+For the same reason, **a write does not invalidate the index**. Only the vault's own change
+notifications do. If writing marked the index dirty, the next query would rebuild from a cache
+still holding the pre-write frontmatter and publish that as current — deterministically, on the
+first write a UI makes. So the index keeps describing the previous state until Obsidian says
+otherwise, and then the matching change event fires.
 
 ## A worked example
 
@@ -135,6 +182,3 @@ api.listGeorefs();
 - `registerTimeAdapter`, and the `at` filter on `featuresIn` — date fields (`geb-from`, `geb-to`,
   `geb-calendar`) are read and handed to you as **raw text**. Deciding what "450" means belongs to
   a time adapter, which arrives with its own phase.
-- The `georefs-changed`, `fit-changed` and `features-changed` events. `ready` and `unload` are
-  live now; the change events arrive with the indexed build, because firing them honestly requires
-  a per-note content fingerprint that does not exist yet.

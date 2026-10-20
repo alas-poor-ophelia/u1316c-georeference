@@ -34,12 +34,11 @@ import { MIN_POINTS, type ControlPoint, type TransformKind, type TransformOption
 import { hashBytes } from "../persist/identity";
 import { linkTarget } from "../persist/links";
 import { toFrontmatter } from "../persist/serialize";
-import { KEY, type Georeference, type ParseResult, type StoredFit, type VaultPort } from "../persist/types";
+import { KEY, type Georeference, type ParseResult, type Staleness, type StoredFit, type VaultPort } from "../persist/types";
 import { createAndCapture, writeAndCapture } from "../persist/write";
 import { featuresIn, georefsCovering } from "../query/coverage";
-import { FitMemo } from "../query/fit-memo";
-import { buildIndex } from "../query/store";
 import type { LoadedGeoref, WorldIndex } from "../query/types";
+import { IndexHost, type ChangeSet } from "./host";
 import { codedError } from "./errors";
 import {
 	API_VERSION,
@@ -115,6 +114,14 @@ type BuiltApi = Omit<GebAPI, keyof Lifecycle> & Lifecycle;
 export class ApiController {
 	private readonly listeners = new Map<GebEvent, Set<Listener>>();
 	private alive = true;
+	/** Writes Geb performed. Added to the host's own counter so both move `generation`. */
+	private writes = 0;
+	/**
+	 * What reconciliation found, per note path. ABSENT means "not checked", which is why
+	 * `getImageInfo` reports `"unknown"` by default — only reconciliation reads bytes, and
+	 * claiming `"same"` for an image nobody looked at is an answer nobody earned.
+	 */
+	private readonly staleness = new Map<string, Staleness>();
 	private readonly built: BuiltApi;
 	readonly api: GebAPI;
 
@@ -122,10 +129,10 @@ export class ApiController {
 		private readonly port: VaultPort,
 		private readonly pluginVersion: string,
 		/**
-		 * Content-keyed memo for fitted transforms. Injectable so a test can read its solve
-		 * counters and prove reuse by MECHANISM rather than by timing a stopwatch.
+		 * The cached index. Injectable so a test can drive invalidation directly and read the
+		 * memo's solve counters — proving reuse by MECHANISM rather than by timing a stopwatch.
 		 */
-		private readonly fits: FitMemo = new FitMemo(),
+		readonly host: IndexHost = new IndexHost(port),
 	) {
 		this.built = this.build();
 		this.api = this.built;
@@ -144,7 +151,11 @@ export class ApiController {
 		this.listeners.clear();
 		// A memoised fit for a 300-point spline holds that spline's solved matrix; there is no
 		// reason to keep one alive after the plugin is gone.
-		this.fits.clear();
+		this.host.clear();
+		// Hygiene with no observable effect on the surface: every method throws after unload and
+		// the plugin discards this controller. Kept because a retained reference should not keep a
+		// map of verdicts alive, and labelled because no test can prove it.
+		this.staleness.clear();
 	}
 
 	private assertLive(): void {
@@ -161,11 +172,30 @@ export class ApiController {
 				"The vault has not finished indexing. Wait for geb:ready — an empty answer now would be wrong rather than empty.",
 			);
 		}
-		return buildIndex(this.port, this.fits);
+		return this.host.snapshot();
 	}
 
-	private emit(type: GebEvent): void {
-		const payload: GebEventPayload = Object.freeze({ type, generation: this.built.generation });
+	/**
+	 * Rebuild if the vault moved, and emit whatever that earned.
+	 *
+	 * Called by the plugin on a debounce after a vault change. A flush that found nothing emits
+	 * nothing, so a body edit that left the frontmatter alone is silent rather than noise.
+	 */
+	flush(): ChangeSet | null {
+		if (!this.alive || !this.built.ready) return null;
+		const change = this.host.flush();
+		if (change === null) return null;
+		this.built.generation = this.host.generation + this.writes;
+		for (const event of change.events) this.emit(event, change.paths);
+		return change;
+	}
+
+	private emit(type: GebEvent, paths: readonly string[] = []): void {
+		const payload: GebEventPayload = Object.freeze({
+			type,
+			generation: this.built.generation,
+			paths: Object.freeze([...paths]),
+		});
 		for (const cb of this.listeners.get(type) ?? []) {
 			try {
 				cb(payload);
@@ -214,7 +244,8 @@ export class ApiController {
 	 * dropped data would hide exactly what the user needs in order to fix it.
 	 */
 	private captured(result: ParseResult<Georeference>, notePath: string): GeorefSummary {
-		this.built.generation += 1;
+		this.writes += 1;
+		this.built.generation = this.host.generation + this.writes;
 		if (result.value === null) {
 			throw codedError(
 				"geb-bad-argument",
@@ -353,9 +384,9 @@ export class ApiController {
 					height: g.record.image.height,
 					byteLength: g.record.image.byteLength,
 					hash: g.record.image.hash,
-					// NEVER "same". Only reconciliation reads bytes, and it has not run for this
-					// call, so "same" would be an answer nobody earned.
-					staleness: "unknown",
+					// Absent from the map means NOT CHECKED, and that is reported as `"unknown"`
+					// rather than defaulted to `"same"`. Only reconciliation reads bytes.
+					staleness: this.staleness.get(g.notePath) ?? "unknown",
 				} satisfies ImageInfo);
 			},
 			getFit: (id) => {
@@ -391,7 +422,8 @@ export class ApiController {
 			deleteGeoref: async (id) => {
 				const notePath = this.require(this.snapshot(), id).notePath;
 				await this.port.trashNote(notePath);
-				this.built.generation += 1;
+				this.writes += 1;
+				this.built.generation = this.host.generation + this.writes;
 			},
 			addPoint: (id, point) => this.editPoints(id, (pts) => [...pts, point]),
 			updatePoint: (id, i, point) =>
@@ -416,6 +448,17 @@ export class ApiController {
 				});
 			},
 		};
+	}
+
+	/**
+	 * Record what reconciliation found about one note's image.
+	 *
+	 * Called by the plugin after a reconcile pass. Before this existed, `getImageInfo` promised a
+	 * staleness that nothing computed, and `main.ts` dropped every outcome it had already worked
+	 * out to the console.
+	 */
+	recordStaleness(notePath: string, value: Staleness): void {
+		this.staleness.set(notePath, value);
 	}
 
 	/** Wraps an unsubscribe so it runs at most once, per the house registry pattern. */

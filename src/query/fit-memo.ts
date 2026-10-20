@@ -40,8 +40,12 @@ import type { StoredFit } from "../persist/types";
  * fixed order today, so a key straight from `JSON.stringify` would work by accident and break the
  * day anything constructs a record differently — a patch applied field by field, a future
  * migration, a third party writing frontmatter by hand.
+ *
+ * Exported because the index host needs the same guarantee when it fingerprints a FEATURE to
+ * decide whether to fire `features-changed`. One canonical serialiser in the codebase, not two
+ * that drift.
  */
-function canonical(v: unknown): string {
+export function canonical(v: unknown): string {
 	if (v === null) return "null";
 	if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
 	if (typeof v === "object") {
