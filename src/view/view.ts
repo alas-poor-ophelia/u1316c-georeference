@@ -92,6 +92,7 @@ export class GeorefView extends ItemView implements Surface {
 	private readoutEl: HTMLElement | null = null;
 	private statusEl: HTMLElement | null = null;
 	private messageEl: HTMLElement | null = null;
+	private resizeObserver: ResizeObserver | null = null;
 	private buttons: HTMLButtonElement[] = [];
 	private editBtn: HTMLButtonElement | null = null;
 	private editBar: HTMLElement | null = null;
@@ -180,6 +181,8 @@ export class GeorefView extends ItemView implements Surface {
 		this.restoredDraft = this.shell?.draft ?? this.restoredDraft;
 		this.shell?.close();
 		this.shell = null;
+		this.resizeObserver?.disconnect();
+		this.resizeObserver = null;
 		this.painted = null;
 		this.viewportEl = null;
 		this.stageEl = null;
@@ -269,6 +272,14 @@ export class GeorefView extends ItemView implements Surface {
 		// Inside the viewport, over the stage: the viewport keeps its size while a message shows.
 		this.messageEl = vp.createDiv({ cls: "geb-message" });
 		this.messageEl.hide();
+
+		// THE LEAF CAN BE LAID OUT AFTER onOpen, and Obsidian's `onResize` does not always say so.
+		// Measured live after a plugin reload: the first fit ran against a viewport 19 px tall,
+		// scale 0.06, and nothing refitted it — a map the size of a postage stamp in the corner,
+		// which is the stage-B defect in a new coat. The shell's `resize` refits only until the
+		// user has taken the viewport somewhere, so observing is safe at every moment after.
+		this.resizeObserver = new ResizeObserver(() => this.shell?.resize());
+		this.resizeObserver.observe(vp);
 
 		this.wirePointer(vp);
 	}
@@ -519,7 +530,11 @@ export class GeorefView extends ItemView implements Surface {
 			// no ring's fill covers a neighbour's dot.
 			const g = svg.createSvg("g");
 			g.setAttribute("transform", `translate(${pin.x} ${pin.y}) scale(${1 / scale})`);
-			const dot = g.createSvg("circle", { cls: pin.extrapolated ? "geb-pin geb-extrapolated" : "geb-pin" });
+			// `classList.add`, not `cls`: the SVG factory's `cls` refuses a token with a space in it
+			// (measured live, as an InvalidCharacterError that left the point dialog open).
+			const dot = g.createSvg("circle");
+			dot.classList.add("geb-pin");
+			if (pin.extrapolated) dot.classList.add("geb-extrapolated");
 			dot.setAttribute("r", String(PIN_RADIUS));
 			const label = g.createSvg("text", { cls: "geb-pin-label" });
 			label.setAttribute("x", String(LABEL_OFFSET));
@@ -530,10 +545,10 @@ export class GeorefView extends ItemView implements Surface {
 		for (const cp of frame.controlPoints) {
 			const g = svg.createSvg("g");
 			g.setAttribute("transform", `translate(${cp.x} ${cp.y}) scale(${1 / scale})`);
-			const classes = ["geb-cp"];
-			if (cp.selected) classes.push("geb-cp-selected");
-			if (cp.worst) classes.push("geb-cp-worst");
-			const mark = g.createSvg("rect", { cls: classes.join(" ") });
+			const mark = g.createSvg("rect");
+			mark.classList.add("geb-cp");
+			if (cp.selected) mark.classList.add("geb-cp-selected");
+			if (cp.worst) mark.classList.add("geb-cp-worst");
 			mark.setAttribute("x", String(-CP_HALF));
 			mark.setAttribute("y", String(-CP_HALF));
 			mark.setAttribute("width", String(2 * CP_HALF));

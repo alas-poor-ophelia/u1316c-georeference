@@ -36,5 +36,5 @@ export default [
 			globals: { Bun: "readonly", process: "readonly", console: "readonly" },
 		},
 	},
-	{ ignores: ["node_modules/**", "main.js", "**/*.json", "**/*.mjs", "**/*.cjs"] },
+	{ ignores: ["node_modules/**", "main.js", "test/live/geb-live/.obsidian/**", "**/*.json", "**/*.mjs", "**/*.cjs"] },
 ];

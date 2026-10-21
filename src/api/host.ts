@@ -72,6 +72,14 @@ export class IndexHost {
 	/** The first build is the initial STATE, not a change. See `rebuild`. */
 	private everBuilt = false;
 	private readonly fits = new FitMemo();
+	/**
+	 * What query-time rebuilds found and nobody has announced yet. A query between an
+	 * invalidation and the debounced flush used to rebuild, clear the dirty flag and DISCARD its
+	 * change set, so the flush that followed saw nothing to do and the events were lost — and the
+	 * plugin's own command-palette check is such a query. Found live: a saved map's view sat on
+	 * "waiting for Obsidian" forever while the index already held the map.
+	 */
+	private held: { readonly events: Set<ChangeEvent>; readonly paths: Set<string> } | null = null;
 
 	constructor(private readonly port: VaultPort) {}
 
@@ -104,24 +112,42 @@ export class IndexHost {
 		else this.pending.clear();
 	}
 
-	/** The current snapshot, rebuilt first if the vault has moved under us. */
+	/** The current snapshot, rebuilt first if the vault has moved under us. The change is HELD. */
 	snapshot(): WorldIndex {
-		if (this.dirty || this.current === null) this.rebuild();
+		if (this.dirty || this.current === null) this.hold(this.rebuild());
 		return this.current!;
 	}
 
 	/**
-	 * Rebuild if dirty and report what changed. Returns null when there was nothing to do, so a
+	 * Rebuild if dirty, then report everything that changed since the last flush — including what
+	 * a query-time rebuild found in between. Returns null when there was nothing to do, so a
 	 * debounced caller does not emit an event for a flush that did no work.
 	 */
 	flush(): ChangeSet | null {
-		if (!this.dirty && this.current !== null) return null;
-		return this.rebuild();
+		let built: ChangeSet | null = null;
+		if (this.dirty || this.current === null) {
+			built = this.rebuild();
+			this.hold(built);
+		}
+		const held = this.held;
+		this.held = null;
+		if (held !== null) return { events: [...held.events], paths: [...held.paths] };
+		return built;
+	}
+
+	/** Keep a change set until a flush announces it. An empty one is nothing to keep. */
+	private hold(change: ChangeSet): void {
+		if (change.events.length === 0 && change.paths.length === 0) return;
+		const held = this.held ?? { events: new Set<ChangeEvent>(), paths: new Set<string>() };
+		for (const e of change.events) held.events.add(e);
+		for (const p of change.paths) held.paths.add(p);
+		this.held = held;
 	}
 
 	/** Drop everything. The solved fits are the expensive part. */
 	clear(): void {
 		this.current = null;
+		this.held = null;
 		this.sigs = new Map();
 		this.pending.clear();
 		this.dirty = true;

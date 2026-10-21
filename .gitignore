@@ -20,3 +20,10 @@ scripts/_scratch-*.ts
 # gate; its generated case and output JSON are not, being large, regenerable and machine-specific.
 scripts/oracle/*.json
 scripts/oracle/__pycache__/
+
+# The live gate's fixture vault: only the fixtures and the plugin list are tracked. Obsidian's own
+# state files, the installed plugin copy (regenerated from the build) and screenshots are not.
+test/live/geb-live/.obsidian/*
+!test/live/geb-live/.obsidian/community-plugins.json
+test/live/geb-live/.trash/
+test/live/screenshots/

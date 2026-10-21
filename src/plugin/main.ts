@@ -105,13 +105,10 @@ export default class GebPlugin extends Plugin {
 		// instead of from an event. Run it once, after the cache has actually been built:
 		// `resolved` refires on every later change, so the listener detaches itself.
 		this.app.workspace.onLayoutReady(() => {
-			const holder: { ref: EventRef | null } = { ref: null };
-			holder.ref = this.app.metadataCache.on("resolved", () => {
-				if (holder.ref !== null) this.app.metadataCache.offref(holder.ref);
-				// READY IS DECLARED HERE AND NOWHERE ELSE. `resolved` is the only signal that the
-				// metadata cache is fully built, and every vault-backed API method refuses until
-				// it has fired — this is the same "the vault was still indexing" hazard
-				// reconciliation already handles, arriving in the query layer.
+			// READY IS DECLARED IN ONE PLACE. `resolved` is the signal that the metadata cache is
+			// fully built, and every vault-backed API method refuses until then — the same "the
+			// vault was still indexing" hazard reconciliation handles, arriving in the query layer.
+			const declareReady = (): void => {
 				this.controller?.markReady();
 				this.app.workspace.trigger("geb:ready");
 				// REGISTERED ONLY NOW, after the cache has resolved. Obsidian fires `changed` once
@@ -119,6 +116,23 @@ export default class GebPlugin extends Plugin {
 				// be an invalidation of an index the first build is about to make anyway.
 				this.watchVault();
 				void this.runReconcile();
+			};
+			// BUT `resolved` MAY ALREADY HAVE FIRED. Measured live on 1.14.4, fixture vault: a
+			// plugin enabled from settings, reloaded, or loaded at startup into a small vault
+			// finds the cache already built, and `resolved` never fires again on its own — so a
+			// listener registered now waits forever and the plugin is dead until some file
+			// changes. The cache carries an undocumented `initialized` flag that is true once the
+			// initial build is done; when it says so, ready is declared at once. If the flag is
+			// ever absent, this falls through to waiting, which is the old behaviour.
+			const cache = this.app.metadataCache as typeof this.app.metadataCache & { readonly initialized?: boolean };
+			if (cache.initialized === true) {
+				declareReady();
+				return;
+			}
+			const holder: { ref: EventRef | null } = { ref: null };
+			holder.ref = cache.on("resolved", () => {
+				if (holder.ref !== null) cache.offref(holder.ref);
+				declareReady();
 			});
 			this.registerEvent(holder.ref);
 		});

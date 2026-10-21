@@ -415,6 +415,14 @@ const MUTANTS: readonly Mutant[] = [
 		replace: "\tconst worst = [...d.affine].sort((a, b) => a.error - b.error)[0];",
 	},
 
+	// --- api/host.ts: events survive a query-time rebuild ----------------------------------
+	{
+		label: "a query between an invalidation and the flush swallows the events (found live)",
+		file: "src/api/host.ts",
+		find: "\t\tif (this.dirty || this.current === null) this.hold(this.rebuild());\n\t\treturn this.current!;",
+		replace: "\t\tif (this.dirty || this.current === null) this.rebuild();\n\t\treturn this.current!;",
+	},
+
 	// --- view/shell.ts: the control-point editor ------------------------------------------
 	{
 		label: "a tap while editing opens the place note under it instead of selecting or placing",

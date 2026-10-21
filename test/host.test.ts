@@ -249,3 +249,36 @@ describe("scope and staleness", () => {
 		expect(host.flush()!.events).toContain("fit-changed");
 	});
 });
+
+describe("a query inside the debounce window", () => {
+	test("rebuilds the index but does not swallow the events the flush then announces", () => {
+		host.flush();
+		v.addNote("places/Londinium.md", { lat: 51.5, lng: -0.1 });
+		host.invalidate("places/Londinium.md");
+		// The query rebuilds synchronously, as it must. The change it found is held, not lost:
+		// found live, where the view of a just-saved map waited forever for an event that a
+		// command-palette check had already consumed.
+		expect(host.snapshot().features.map((f) => f.notePath)).toContain("places/Londinium.md");
+		expect(host.isDirty).toBe(false);
+		const out = host.flush();
+		expect(out).not.toBeNull();
+		expect(out?.events).toEqual(["features-changed"]);
+		expect(out?.paths).toEqual(["places/Londinium.md"]);
+		// Announced once, and a quiet flush is still quiet.
+		expect(host.flush()).toBeNull();
+	});
+
+	test("two query-time rebuilds before one flush announce the union", () => {
+		host.flush();
+		v.addNote("places/Londinium.md", { lat: 51.5, lng: -0.1 });
+		host.invalidate("places/Londinium.md");
+		host.snapshot();
+		v.notes.delete(MAP);
+		v.files.delete(MAP);
+		host.invalidate(MAP);
+		host.snapshot();
+		const out = host.flush();
+		expect([...(out?.events ?? [])].sort()).toEqual(["features-changed", "georefs-changed"]);
+		expect([...(out?.paths ?? [])].sort()).toEqual([MAP, "places/Londinium.md"]);
+	});
+});
