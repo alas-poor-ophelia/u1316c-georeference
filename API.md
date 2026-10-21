@@ -65,6 +65,8 @@ Errors are `Error` objects with a `code` property, so you can branch without mat
 | `apiVersion` | value | `1`. *(API 1)* |
 | `ready` | value | False until the vault is indexed, false again after unload. *(API 1)* |
 | `generation` | value | Monotonic; moves whenever Geb's view of the world may have changed. *(API 1)* |
+| `minPoints` | value | Per model, the fewest control points it can be fitted from at all. *(API 1)* |
+| `recommendedPoints` | value | Per model, the count below which the fit's residuals carry no information. *(API 1)* |
 | `listCrs` | method | Every known coordinate system. *(API 1)* |
 | `getCrs` | method | One by id, or `null`. *(API 1)* |
 | `listGeorefs` | method | Every loaded map, summarised. *(API 1)* |
@@ -136,7 +138,12 @@ involved and no `ready` gate, and it returns a discriminated result rather than 
 view placing its second control point does not need a try/catch per click. Hold your in-progress
 points yourself, call `previewFit` as the user places them, and commit once with `createGeoref`.
 Persisting every placement instead means a disk write, a metadata reparse and a full refit per
-click, and on a large spline that refit is measured in hundreds of milliseconds.
+click, and on a large spline that refit is measured in hundreds of milliseconds. Geb's own editor
+is built exactly this way, through this surface and nothing else. Two values help it, and will
+help you: `minPoints[model]` is where `previewFit` starts succeeding, and `recommendedPoints[model]`
+is where its residuals start meaning anything — an affine fit over exactly three points
+reproduces them whatever the coordinates say, so a residual shown below that count is a
+flattering zero, not a measurement.
 
 **Every write returns the record as parsed back from what was written.** Not the input you passed,
 and not a re-read. Geb reads through Obsidian's metadata cache and writes through its frontmatter

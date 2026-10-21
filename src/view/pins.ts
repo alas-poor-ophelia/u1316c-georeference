@@ -52,6 +52,28 @@ export function uncertaintyRadius(pin: Pixel, probe: Pixel | null): number | nul
 	return Number.isFinite(r) && r > 0 ? r : null;
 }
 
+/**
+ * The index of the nearest of `points` within `radius` image pixels, or null. The editor's hit
+ * test for control points: the same nearest-not-first rule as `pinAt`, with a tie broken by the
+ * lower index so that two points placed on one pixel are at least picked stably.
+ */
+export function nearestIndex(points: readonly Pixel[], at: Pixel, radius: number): number | null {
+	if (!(radius > 0) || !Number.isFinite(at.x) || !Number.isFinite(at.y)) return null;
+	const r2 = radius * radius;
+	let best: number | null = null;
+	let bestD2 = Number.POSITIVE_INFINITY;
+	points.forEach((p, i) => {
+		const dx = p.x - at.x;
+		const dy = p.y - at.y;
+		const d2 = dx * dx + dy * dy;
+		if (d2 <= r2 && d2 < bestD2) {
+			best = i;
+			bestD2 = d2;
+		}
+	});
+	return best;
+}
+
 /** Pins that are extrapolated — outside the control-point hull, so resolved but fuzzy. */
 export function extrapolated(pins: readonly PinInfo[]): readonly PinInfo[] {
 	return pins.filter((p) => p.extrapolated);

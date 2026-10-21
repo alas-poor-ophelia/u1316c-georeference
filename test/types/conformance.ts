@@ -83,6 +83,8 @@ export const API_KEYS = [
 	"apiVersion",
 	"ready",
 	"generation",
+	"minPoints",
+	"recommendedPoints",
 	"listCrs",
 	"getCrs",
 	"listGeorefs",

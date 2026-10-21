@@ -78,8 +78,8 @@ describe("the surface itself", () => {
 		for (const key of API_KEYS) {
 			expect(key in c.api, key).toBe(true);
 		}
-		// The four values, and the rest functions.
-		const values = new Set(["version", "apiVersion", "ready", "generation"]);
+		// The six values, and the rest functions.
+		const values = new Set(["version", "apiVersion", "ready", "generation", "minPoints", "recommendedPoints"]);
 		for (const key of API_KEYS) {
 			const v = (c.api as unknown as Record<string, unknown>)[key];
 			expect(typeof v === "function", `${key} should be a function`).toBe(!values.has(key));

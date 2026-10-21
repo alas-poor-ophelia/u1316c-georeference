@@ -249,6 +249,10 @@ export interface GebAPI {
 	readonly apiVersion: 1;
 	readonly ready: boolean;
 	readonly generation: number;
+	/** The fewest control points each model can be fitted from at all. *(API 1)* */
+	readonly minPoints: Readonly<Record<TransformKind, number>>;
+	/** The count below which a model is fittable but its residuals carry no information. *(API 1)* */
+	readonly recommendedPoints: Readonly<Record<TransformKind, number>>;
 
 	listCrs(): readonly CrsInfo[];
 	getCrs(id: string): CrsInfo | null;

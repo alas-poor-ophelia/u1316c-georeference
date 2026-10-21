@@ -43,6 +43,11 @@ export class Recorder implements Surface {
 	imageSrc(path: string): string {
 		return `res:${path}`;
 	}
+	/** What a decode would find. Replace to model a broken image. */
+	measured: () => Promise<{ width: number; height: number }> = () => Promise.resolve({ ...IMAGE });
+	measureImage(): Promise<{ width: number; height: number }> {
+		return this.measured();
+	}
 	paint(frame: Frame): void {
 		this.frames.push(frame);
 	}

@@ -414,6 +414,152 @@ const MUTANTS: readonly Mutant[] = [
 		find: "\tconst worst = [...d.affine].sort((a, b) => b.error - a.error)[0];",
 		replace: "\tconst worst = [...d.affine].sort((a, b) => a.error - b.error)[0];",
 	},
+
+	// --- view/shell.ts: the control-point editor ------------------------------------------
+	{
+		label: "a tap while editing opens the place note under it instead of selecting or placing",
+		file: "src/view/shell.ts",
+		find: "\t\tif (this.edit !== null) {\n\t\t\tconst i = this.draftPointAt(img, hitRadiusCss);",
+		replace: "\t\tif (false) {\n\t\t\tconst i = this.draftPointAt(img, hitRadiusCss);",
+	},
+	{
+		label: "draft hit radius not scaled into image pixels",
+		file: "src/view/shell.ts",
+		find: "\t\t\thitRadiusCss / this.viewport.scale,",
+		replace: "\t\t\thitRadiusCss,",
+	},
+	{
+		label: "save ignores the preview and sends an unfittable draft to the API",
+		file: "src/view/shell.ts",
+		find: "\t\tif (e === null || this.image === null || this.saving || !e.preview.ok) return false;",
+		replace: "\t\tif (e === null || this.image === null || this.saving) return false;",
+	},
+	{
+		label: "residuals shown at the exactly-determined count (the zero-DOF flattery)",
+		file: "src/view/shell.ts",
+		find: "\t\tconst informative = e.preview.ok && e.points.length >= this.api.recommendedPoints.affine;",
+		replace: "\t\tconst informative = e.preview.ok;",
+	},
+	{
+		label: "a moved point on a saved map reads as clean (only the model is compared)",
+		file: "src/view/shell.ts",
+		find: "\t\treturn e.model !== this.fit.model || !samePoints(e.points, this.fit.points);",
+		replace: "\t\treturn e.model !== this.fit.model;",
+	},
+	{
+		label: "a change elsewhere, before the index has the new note, throws the new map away",
+		file: "src/view/shell.ts",
+		find: "\t\t\t\tif (this.pending !== null && this.image !== null) {",
+		replace: "\t\t\t\tif (false) {",
+	},
+	{
+		label: "the 'saved' status never clears once the map has loaded",
+		file: "src/view/shell.ts",
+		find: "\t\t\tif (this.caughtUp()) this.pending = null;\n",
+		replace: "\t\t\tvoid 0;\n",
+	},
+	{
+		label: "'saved' clears on ANY load, including one that returned the stale fit",
+		file: "src/view/shell.ts",
+		find: "\t\treturn f !== null && f.model === p.model && samePoints(f.points, p.points);",
+		replace: "\t\treturn f !== null;",
+	},
+	{
+		label: "a point placed or dragged off the image is not clamped to it",
+		file: "src/view/shell.ts",
+		find: "\t\tconst px = Math.min(image.width, Math.max(0, p.px));",
+		replace: "\t\tconst px = p.px;",
+	},
+	{
+		label: "edits land during a save and are lost (the lock ignores `saving`)",
+		file: "src/view/shell.ts",
+		find: "\t\treturn this.edit === null || this.image === null || this.saving;",
+		replace: "\t\treturn this.edit === null || this.image === null;",
+	},
+	{
+		label: "Edit is offered while the write awaits the index (overwrites the save with the stale fit)",
+		file: "src/view/shell.ts",
+		find: "\t\tif (this.image === null || this.edit !== null || this.pending !== null || this.saving) return;",
+		replace: "\t\tif (this.image === null || this.edit !== null || this.saving) return;",
+	},
+	{
+		label: "a save does not reload, so an event that beat the write leaves the status stuck",
+		file: "src/view/shell.ts",
+		find: "\t\t\t\tif (written) this.load();",
+		replace: "\t\t\t\tif (written) this.paint();",
+	},
+	{
+		label: "the grab offset is ignored, so a point jumps under the pointer on the first moved pixel",
+		file: "src/view/shell.ts",
+		find: "\t\t\tthis.grabOffset = { x: p.px - img.x, y: p.py - img.y };",
+		replace: "\t\t\tthis.grabOffset = { x: 0, y: 0 };",
+	},
+	{
+		label: "a drag does not carry the readout with it",
+		file: "src/view/shell.ts",
+		find: "\t\tthis.hover = at;\n\t\tthis.replacePoint(index,",
+		replace: "\t\tthis.replacePoint(index,",
+	},
+	{
+		label: "'saved, waiting' shadows a draft's own status",
+		file: "src/view/shell.ts",
+		find: "\t\tif (this.pending !== null) return STATUS.saved;\n\t\treturn this.fit === null",
+		replace: "\t\treturn this.fit === null",
+	},
+	{
+		label: "a placed point is not selected",
+		file: "src/view/shell.ts",
+		find: "\t\tthis.setEdit(this.edit.model, [...this.edit.points, this.clamp(point)], this.edit.points.length);",
+		replace: "\t\tthis.setEdit(this.edit.model, [...this.edit.points, this.clamp(point)], null);",
+	},
+	{
+		label: "the draft is lost on unload (the message state clears it)",
+		file: "src/view/shell.ts",
+		find: "\t\tthis.pendingFit = false;\n\t\tthis.surface.message(text);",
+		replace: "\t\tthis.pendingFit = false;\n\t\tthis.edit = null;\n\t\tthis.surface.message(text);",
+	},
+	{
+		label: "save on a saved map drops the model change",
+		file: "src/view/shell.ts",
+		find: "\t\t\t\t\tmodel: e.model,\n\t\t\t\t\tpoints: e.points,\n\t\t\t\t\t...(lambda",
+		replace: "\t\t\t\t\tpoints: e.points,\n\t\t\t\t\t...(lambda",
+	},
+	{
+		label: "the readout hides the pixel while editing",
+		file: "src/view/shell.ts",
+		find: "\t\tconst px = this.edit === null ? \"\" : `${Math.round(img.x)}, ${Math.round(img.y)} px`;",
+		replace: "\t\tconst px = \"\";",
+	},
+	{
+		label: "a tap on empty image while editing places a point OUTSIDE the image too",
+		file: "src/view/shell.ts",
+		find: "\t\t\tif (!insideImage(this.image, img)) return MISS;",
+		replace: "\t\t\tvoid 0;",
+	},
+	{
+		label: "a restored draft is fitted but never shown (constructor skips the frame objects)",
+		file: "src/view/shell.ts",
+		find: "\t\tif (options.draft !== undefined) this.setEdit(options.draft.model, options.draft.points, null);",
+		replace: "\t\tif (options.draft !== undefined) this.edit = { model: options.draft.model, points: options.draft.points, selected: null, preview: { ok: false, code: \"geb-too-few-points\", message: \"\" } };",
+	},
+	{
+		label: "a map with no note waits for `ready` like a saved one",
+		file: "src/view/shell.ts",
+		find: "\t\tif (this.create !== null) {\n\t\t\tthis.placeImage(this.create.imagePath);\n\t\t\treturn;\n\t\t}\n\t\tif (!this.api.ready) {",
+		replace: "\t\tif (!this.api.ready) {",
+	},
+	{
+		label: "a stale measurement from a closed shell paints anyway",
+		file: "src/view/shell.ts",
+		find: "\t\t\t\tif (gen !== this.measureGen) return;",
+		replace: "\t\t\t\tvoid gen;",
+	},
+	{
+		label: "nearest draft point: first within radius wins, not the nearest",
+		file: "src/view/pins.ts",
+		find: "\t\tif (d2 <= r2 && d2 < bestD2) {",
+		replace: "\t\tif (d2 <= r2 && best === null) {",
+	},
 ];
 
 /** Per-mutant ceiling. The clean suite runs in well under a second, so this is generous. */

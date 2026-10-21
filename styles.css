@@ -172,3 +172,47 @@
 	cursor: default;
 	opacity: 0.5;
 }
+
+/* --- The control-point editor ------------------------------------------------------------- */
+
+.geb-edit-bar {
+	display: inline-flex;
+	gap: var(--size-4-2);
+	align-items: center;
+}
+
+/* A control point is a SQUARE so it cannot be mistaken for a round place pin. Positioned in
+   image pixels and counter-scaled by the adapter, like a pin. */
+.geb-cp {
+	fill: var(--background-primary);
+	stroke: var(--text-accent);
+	stroke-width: 2px;
+}
+
+.geb-cp.geb-cp-selected {
+	fill: var(--text-accent);
+}
+
+/* The largest residual: where a user should look first. */
+.geb-cp.geb-cp-worst {
+	stroke: var(--text-error);
+}
+
+.geb-cp-label {
+	fill: var(--text-normal);
+	font-size: 12px;
+	paint-order: stroke;
+	stroke: var(--background-primary);
+	stroke-width: 3px;
+	stroke-linejoin: round;
+}
+
+.geb-form-error {
+	color: var(--text-error);
+	font-size: var(--font-ui-small);
+	min-height: 1.5em;
+}
+
+.geb-form-error:empty {
+	display: none;
+}

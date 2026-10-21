@@ -30,7 +30,7 @@
  */
 import { EARTH, getCrs, listCrs } from "../core/crs";
 import { buildFit, toLatLng, toPixel, type Fit } from "../core/fit";
-import { MIN_POINTS, type ControlPoint, type TransformKind, type TransformOptions } from "../core/types";
+import { MIN_POINTS, RECOMMENDED_POINTS, type ControlPoint, type TransformKind, type TransformOptions } from "../core/types";
 import { hashBytes } from "../persist/identity";
 import { linkTarget } from "../persist/links";
 import { toFrontmatter } from "../persist/serialize";
@@ -363,6 +363,9 @@ export class ApiController {
 			// construction. `ready` is false before indexing and false again after unload.
 			ready: false,
 			generation: 0,
+			// Copies, frozen: a consumer that mutates its copy cannot move the kernel's constant.
+			minPoints: Object.freeze({ ...MIN_POINTS }),
+			recommendedPoints: Object.freeze({ ...RECOMMENDED_POINTS }),
 
 			listCrs: () => (live(), handout(listCrs())),
 			getCrs: (id) => (live(), handout(getCrs(id))),

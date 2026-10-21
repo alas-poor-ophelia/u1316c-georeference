@@ -105,10 +105,10 @@ describe("pins", () => {
 		const shell = opened();
 		const york = s.last.pins.find((p) => p.label === "Eboracum")!;
 		const css = toScreen(shell.view, { x: york.x, y: york.y });
-		expect(shell.tap({ x: css.x + 4, y: css.y - 3 })).toBe(true);
+		expect(shell.tap({ x: css.x + 4, y: css.y - 3 }).kind).toBe("note");
 		expect(s.opened).toEqual(["places/Eboracum.md"]);
 		// Far from every pin: the top-left of the container.
-		expect(shell.tap({ x: 2, y: 2 })).toBe(false);
+		expect(shell.tap({ x: 2, y: 2 }).kind).toBe("miss");
 		expect(s.opened).toHaveLength(1);
 	});
 });
@@ -314,7 +314,7 @@ describe("staying current", () => {
 		// Nothing after this may throw, whatever the adapter still forwards.
 		shell.hoverAt({ x: 1, y: 1 });
 		shell.wheel({ x: 1, y: 1 }, -10);
-		expect(shell.tap({ x: 1, y: 1 })).toBe(false);
+		expect(shell.tap({ x: 1, y: 1 }).kind).toBe("miss");
 	});
 
 	test("after close, a vault change no longer paints", () => {

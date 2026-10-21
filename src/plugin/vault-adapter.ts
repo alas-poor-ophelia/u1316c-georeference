@@ -99,6 +99,13 @@ export class ObsidianVault implements VaultPort {
 	 * silently overwrote a note would destroy whatever was there.
 	 */
 	async createNote(notePath: string, mutate: (fm: Record<string, unknown>) => void): Promise<void> {
+		// `vault.create` does not make the parent folder (inferred from the typings and the usual
+		// "Folder doesn't exist" rejection, not measured here). The editor lets a user name a note
+		// path in a folder that is not there yet, and a save that fails on that would fail after
+		// the points were placed, with nowhere to change the path.
+		const slash = notePath.lastIndexOf("/");
+		const folder = slash < 0 ? "" : notePath.slice(0, slash);
+		if (folder !== "" && this.app.vault.getFolderByPath(folder) === null) await this.app.vault.createFolder(folder);
 		const created = await this.app.vault.create(notePath, "");
 		await this.app.fileManager.processFrontMatter(created, mutate);
 	}
@@ -111,4 +118,5 @@ export class ObsidianVault implements VaultPort {
 	}
 }
 
-const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "bmp", "webp", "avif", "svg"]);
+/** What counts as an image: the reconciliation candidates, and the files the editor is offered for. */
+export const IMAGE_EXTENSIONS: ReadonlySet<string> = new Set(["png", "jpg", "jpeg", "gif", "bmp", "webp", "avif", "svg"]);

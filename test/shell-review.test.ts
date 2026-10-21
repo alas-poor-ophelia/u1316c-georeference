@@ -74,7 +74,7 @@ describe("the message state", () => {
 		// before touching the API, which is how a hover that threw `geb-unloaded` went unseen.
 		shell.hoverAt(centre);
 		shell.resize();
-		expect(shell.tap(centre)).toBe(false);
+		expect(shell.tap(centre).kind).toBe("miss");
 		expect(s.frames.length).toBe(painted);
 		expect(s.lastMessage).toBe(MESSAGES.unloaded);
 	});

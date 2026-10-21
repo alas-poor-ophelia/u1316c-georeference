@@ -5,11 +5,12 @@
  * file owns the elements, turns DOM events into shell calls, and paints frames — the shell hands
  * it image-pixel geometry plus a viewport, and one CSS transform on the stage does the rest.
  *
- * WHY A LEAF VIEW AND NOT A CODE-BLOCK EMBED. The control-point editor (stage C) writes
- * frontmatter to a georeference note, and an embed inside that same note would be re-rendered by
- * its own save — editing the thing you are standing on. A leaf holds its viewport and selection
- * across re-renders, serialises its georef id into the workspace layout, and restores on reopen.
- * An embed can come later as a read-only consumer of the same shell.
+ * WHY A LEAF VIEW AND NOT A CODE-BLOCK EMBED. The control-point editor writes frontmatter to a
+ * georeference note, and an embed inside that same note would be re-rendered by its own save —
+ * editing the thing you are standing on. A leaf holds its viewport and selection across
+ * re-renders, serialises its georef id AND ITS DRAFT into the workspace layout, and restores on
+ * reopen: twenty placed points survive an app restart on a phone. An embed can come later as a
+ * read-only consumer of the same shell.
  *
  * MOBILE IS A TARGET (`isDesktopOnly: false`), so every gesture is a pointer event — mouse and
  * touch alike — the readout updates on move and on tap, zoom has buttons as well as a wheel, and
@@ -19,15 +20,33 @@
  * show a message, and the shell's very next act was to measure that element for its first fit —
  * 0x0, so the map opened at 1:1 in the corner. The viewport now stays laid out at all times; the
  * message covers it, the stage underneath is hidden, and the toolbar is disabled.
+ *
+ * THE EDITOR'S DIALOGS ARE THE ONLY ASYNC HERE. A tap on empty image while editing is a request
+ * for a coordinate; the shell says so, this file opens the modal, and the answer goes back to the
+ * shell as one call. The shell never waits on anything the DOM does.
  */
 import { ItemView, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
-import type { GebAPI, Pixel } from "../api/types";
-import { MapShell, PIN_HIT_RADIUS_CSS, PIN_HIT_RADIUS_TOUCH_CSS, type Frame, type Surface } from "./shell";
+import type { ControlPoint, GebAPI, Pixel, TransformKind } from "../api/types";
+import { PointModal } from "./modals";
+import {
+	MapShell,
+	PIN_HIT_RADIUS_CSS,
+	PIN_HIT_RADIUS_TOUCH_CSS,
+	type CreateSource,
+	type Draft,
+	type Frame,
+	type Surface,
+	type Tap,
+} from "./shell";
 
 export const VIEW_TYPE = "geb-georef";
 
 export interface GeorefViewState {
 	readonly georefId: string;
+	/** Present while the map has no note yet. */
+	readonly create?: CreateSource;
+	/** The in-progress edit, so a restart does not lose it. */
+	readonly draft?: Draft;
 }
 
 /** Movement past this many CSS pixels turns a press into a drag rather than a tap. */
@@ -35,12 +54,33 @@ const DRAG_THRESHOLD = 3;
 /** Screen-size pin: radius of the dot and offset of its label, in CSS pixels. */
 const PIN_RADIUS = 5;
 const LABEL_OFFSET = 8;
+/** A control-point marker is a square, so it reads differently from a round place pin. */
+const CP_HALF = 5;
 /** Wheel `deltaMode` 1 (lines) and 2 (pages) scaled to pixels, so a notch means the same everywhere. */
 const DELTA_LINE_PX = 16;
 const DELTA_PAGE_PX = 400;
 
+const MODELS: readonly { readonly kind: TransformKind; readonly name: string }[] = [
+	{ kind: "affine", name: "Affine" },
+	{ kind: "polynomial2", name: "Polynomial (2nd order)" },
+	{ kind: "tps", name: "Thin-plate spline" },
+];
+
+interface Painted {
+	src: string;
+	pins: Frame["pins"];
+	lines: Frame["lines"];
+	controlPoints: Frame["controlPoints"];
+	edit: Frame["edit"];
+	scale: number;
+	viewport: Frame["viewport"];
+}
+
 export class GeorefView extends ItemView implements Surface {
 	georefId = "";
+	private create: CreateSource | null = null;
+	/** A draft from the layout, handed to the next shell booted and then forgotten. */
+	private restoredDraft: Draft | null = null;
 	private shell: MapShell | null = null;
 	/** Set by onClose. A setState that arrives afterwards must not boot a shell nobody closes. */
 	private disposed = false;
@@ -53,8 +93,15 @@ export class GeorefView extends ItemView implements Surface {
 	private statusEl: HTMLElement | null = null;
 	private messageEl: HTMLElement | null = null;
 	private buttons: HTMLButtonElement[] = [];
+	private editBtn: HTMLButtonElement | null = null;
+	private editBar: HTMLElement | null = null;
+	private modelSelect: HTMLSelectElement | null = null;
+	private editPointBtn: HTMLButtonElement | null = null;
+	private deletePointBtn: HTMLButtonElement | null = null;
+	private saveBtn: HTMLButtonElement | null = null;
+	private discardBtn: HTMLButtonElement | null = null;
 	/** What the overlay and stage were last built from, so a repaint can skip what did not move. */
-	private painted: { src: string; pins: Frame["pins"]; lines: Frame["lines"]; scale: number; viewport: Frame["viewport"] } | null = null;
+	private painted: Painted | null = null;
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -77,17 +124,22 @@ export class GeorefView extends ItemView implements Surface {
 	}
 
 	override getDisplayText(): string {
-		return this.georefId === "" ? "Georeference" : `Map: ${this.georefId}`;
+		if (this.georefId === "") return "Georeference";
+		return this.create === null ? `Map: ${this.georefId}` : `New map: ${this.georefId}`;
 	}
 
 	override getIcon(): string {
 		return "map";
 	}
 
-	// --- state: the georef id is what the workspace layout remembers ---------------------------
+	// --- state: what the workspace layout remembers ----------------------------------------------
 
 	override getState(): Record<string, unknown> {
-		return { georefId: this.georefId };
+		const state: Record<string, unknown> = { georefId: this.georefId };
+		if (this.create !== null) state.create = this.create;
+		const draft = this.shell?.draft ?? this.restoredDraft;
+		if (draft !== null) state.draft = draft;
+		return state;
 	}
 
 	/**
@@ -95,12 +147,19 @@ export class GeorefView extends ItemView implements Surface {
 	 * (a leaf opened by `setViewState`). Both orders work: with no DOM yet, `boot` returns and
 	 * `onOpen` boots; with a DOM, `boot` replaces the shell. Verified by tracing both orders in
 	 * review, not by running Obsidian — stage D does that.
+	 *
+	 * The draft is read here and used by the NEXT boot only. Nothing in the layout is trusted
+	 * beyond its shape: a point with a non-finite number is dropped, not fitted.
 	 */
 	override async setState(state: unknown, result: ViewStateResult): Promise<void> {
 		const s = state as Partial<GeorefViewState> | null | undefined;
 		const id = typeof s?.georefId === "string" ? s.georefId : "";
-		if (id !== this.georefId) {
+		const create = readCreate(s?.create);
+		const same = id === this.georefId && create?.imagePath === this.create?.imagePath && create?.notePath === this.create?.notePath;
+		if (!same) {
 			this.georefId = id;
+			this.create = create;
+			this.restoredDraft = readDraft(s?.draft);
 			this.boot();
 		}
 		await super.setState(state, result);
@@ -117,6 +176,8 @@ export class GeorefView extends ItemView implements Surface {
 
 	override onClose(): Promise<void> {
 		this.disposed = true;
+		// The draft outlives the shell: a leaf closed mid-edit and reopened from history resumes.
+		this.restoredDraft = this.shell?.draft ?? this.restoredDraft;
 		this.shell?.close();
 		this.shell = null;
 		this.painted = null;
@@ -128,6 +189,13 @@ export class GeorefView extends ItemView implements Surface {
 		this.statusEl = null;
 		this.messageEl = null;
 		this.buttons = [];
+		this.editBtn = null;
+		this.editBar = null;
+		this.modelSelect = null;
+		this.editPointBtn = null;
+		this.deletePointBtn = null;
+		this.saveBtn = null;
+		this.discardBtn = null;
 		return Promise.resolve();
 	}
 
@@ -142,7 +210,7 @@ export class GeorefView extends ItemView implements Surface {
 		this.shell = null;
 		this.painted = null;
 		if (this.georefId === "") {
-			this.message("Open this view from a georeference note.");
+			this.message("Open this view from a georeference note, or georeference an image.");
 			return;
 		}
 		const api = this.getApi();
@@ -150,7 +218,12 @@ export class GeorefView extends ItemView implements Surface {
 			this.message("Geb is not loaded.");
 			return;
 		}
-		this.shell = new MapShell(api, this.georefId, this);
+		const draft = this.restoredDraft;
+		this.restoredDraft = null;
+		this.shell = new MapShell(api, this.georefId, this, {
+			...(this.create === null ? {} : { create: this.create }),
+			...(draft === null ? {} : { draft }),
+		});
 		this.shell.open();
 	}
 
@@ -162,14 +235,29 @@ export class GeorefView extends ItemView implements Surface {
 		root.addClass("geb-view");
 
 		const toolbar = root.createDiv({ cls: "geb-toolbar" });
-		const button = (label: string, title: string, onClick: () => void): void => {
-			const b = toolbar.createEl("button", { text: label, attr: { "aria-label": title, title } });
+		const button = (parent: HTMLElement, label: string, title: string, onClick: () => void): HTMLButtonElement => {
+			const b = parent.createEl("button", { text: label, attr: { "aria-label": title, title } });
 			this.registerDomEvent(b, "click", () => onClick());
 			this.buttons.push(b);
+			return b;
 		};
-		button("+", "Zoom in", () => this.shell?.zoomIn());
-		button("−", "Zoom out", () => this.shell?.zoomOut());
-		button("Fit", "Fit the whole map in the view", () => this.shell?.fitImage());
+		button(toolbar, "+", "Zoom in", () => this.shell?.zoomIn());
+		button(toolbar, "−", "Zoom out", () => this.shell?.zoomOut());
+		button(toolbar, "Fit", "Fit the whole map in the view", () => this.shell?.fitImage());
+		this.editBtn = button(toolbar, "Edit", "Edit the control points", () => this.shell?.beginEdit());
+
+		const bar = toolbar.createSpan({ cls: "geb-edit-bar" });
+		this.editBar = bar;
+		const select = bar.createEl("select", { cls: "dropdown", attr: { "aria-label": "Transform model" } });
+		for (const m of MODELS) select.createEl("option", { text: m.name, value: m.kind });
+		this.registerDomEvent(select, "change", () => this.shell?.setModel(select.value as TransformKind));
+		this.modelSelect = select;
+		this.editPointBtn = button(bar, "Edit point…", "Change the selected point's coordinate", () => this.editSelected());
+		this.deletePointBtn = button(bar, "Delete point", "Remove the selected point", () => this.deleteSelected());
+		this.saveBtn = button(bar, "Save", "Write the control points to the georeference note", () => void this.shell?.save());
+		this.discardBtn = button(bar, "Discard", "Drop the unsaved changes", () => this.shell?.discardEdit());
+		bar.hide();
+
 		this.statusEl = toolbar.createSpan({ cls: "geb-status" });
 
 		const vp = root.createDiv({ cls: "geb-viewport" });
@@ -196,22 +284,28 @@ export class GeorefView extends ItemView implements Surface {
 	 *   - a finger is wide, so its tap uses the touch hit radius;
 	 *   - a second finger must not hijack the first one's drag, so other pointer ids are ignored;
 	 *   - a cancelled pointer is never a tap, and a lost capture ends the drag cleanly.
+	 *
+	 * WHILE EDITING, a press on a control point grabs it, and the drag that follows moves the
+	 * point instead of the map. The shell decides which; this file only remembers the answer.
 	 */
 	private wirePointer(vp: HTMLElement): void {
 		let active: number | null = null;
 		let pressed: Pixel | null = null;
 		let last: Pixel | null = null;
 		let dragged = false;
+		let grabbed: number | null = null;
 
 		const local = (e: PointerEvent | WheelEvent): Pixel => {
 			const r = vp.getBoundingClientRect();
 			return { x: e.clientX - r.left, y: e.clientY - r.top };
 		};
+		const radius = (e: PointerEvent): number => (e.pointerType === "mouse" ? PIN_HIT_RADIUS_CSS : PIN_HIT_RADIUS_TOUCH_CSS);
 		const reset = (): void => {
 			active = null;
 			pressed = null;
 			last = null;
 			dragged = false;
+			grabbed = null;
 			vp.removeClass("geb-dragging");
 		};
 
@@ -221,6 +315,7 @@ export class GeorefView extends ItemView implements Surface {
 			pressed = local(e);
 			last = pressed;
 			dragged = false;
+			grabbed = this.shell?.grab(pressed, radius(e)) ?? null;
 			vp.setPointerCapture(e.pointerId);
 		});
 		this.registerDomEvent(vp, "pointermove", (e) => {
@@ -232,8 +327,9 @@ export class GeorefView extends ItemView implements Surface {
 					vp.addClass("geb-dragging");
 				}
 				if (dragged) {
+					if (grabbed !== null) this.shell?.movePoint(grabbed, at);
 					// The readout follows the cursor through the drag rather than freezing.
-					this.shell?.drag(at.x - last.x, at.y - last.y, at);
+					else this.shell?.drag(at.x - last.x, at.y - last.y, at);
 					last = at;
 					return;
 				}
@@ -244,15 +340,10 @@ export class GeorefView extends ItemView implements Surface {
 			if (active === null || e.pointerId !== active) return;
 			const at = local(e);
 			const wasTap = !dragged && !cancelled;
-			const touch = e.pointerType !== "mouse";
+			const r = radius(e);
 			reset();
 			if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId);
-			if (wasTap) {
-				// A tap that hits no pin still updates the readout, which is how a touch screen
-				// reads a coordinate at all.
-				const hit = this.shell?.tap(at, touch ? PIN_HIT_RADIUS_TOUCH_CSS : PIN_HIT_RADIUS_CSS) ?? false;
-				if (!hit) this.shell?.hoverAt(at);
-			}
+			if (wasTap) this.onTap(this.shell?.tap(at, r) ?? { kind: "miss" }, at);
 		};
 		this.registerDomEvent(vp, "pointerup", (e) => release(e, false));
 		this.registerDomEvent(vp, "pointercancel", (e) => release(e, true));
@@ -273,6 +364,40 @@ export class GeorefView extends ItemView implements Surface {
 		);
 	}
 
+	/** Act on what the shell said a tap meant. A tap that opened nothing still updates the readout. */
+	private onTap(tap: Tap, at: Pixel): void {
+		switch (tap.kind) {
+			case "note":
+				return;
+			case "place":
+				this.askPoint({ px: tap.pixel.x, py: tap.pixel.y }, (p) => this.shell?.placePoint(p));
+				return;
+			case "selected":
+			case "miss":
+				// How a touch screen reads a coordinate at all.
+				this.shell?.hoverAt(at);
+				return;
+		}
+	}
+
+	private askPoint(initial: ControlPoint | { px: number; py: number }, then: (p: ControlPoint) => void): void {
+		const api = this.getApi();
+		if (api === null) return;
+		new PointModal(this.app, api, this.painted?.edit?.crs ?? "earth", initial, then).open();
+	}
+
+	private editSelected(): void {
+		const i = this.painted?.edit?.selected ?? null;
+		const point = i === null ? undefined : this.shell?.draft?.points[i];
+		if (i === null || point === undefined) return;
+		this.askPoint(point, (p) => this.shell?.replacePoint(i, p));
+	}
+
+	private deleteSelected(): void {
+		const i = this.painted?.edit?.selected ?? null;
+		if (i !== null) this.shell?.deletePoint(i);
+	}
+
 	// --- Surface -------------------------------------------------------------------------------
 
 	size(): { width: number; height: number } {
@@ -284,6 +409,17 @@ export class GeorefView extends ItemView implements Surface {
 		return this.app.vault.adapter.getResourcePath(path);
 	}
 
+	/** Decode off-screen. The natural size is what `createGeoref` stores and coverage is defined by. */
+	measureImage(src: string): Promise<{ width: number; height: number }> {
+		return new Promise((resolve, reject) => {
+			// Detached: never appended, so it decodes without being laid out.
+			const img = createEl("img");
+			img.addEventListener("load", () => resolve({ width: img.naturalWidth, height: img.naturalHeight }));
+			img.addEventListener("error", () => reject(new Error(`Could not load ${src}`)));
+			img.src = src;
+		});
+	}
+
 	message(text: string): void {
 		this.painted = null;
 		this.messageEl?.setText(text);
@@ -292,6 +428,10 @@ export class GeorefView extends ItemView implements Surface {
 		this.readoutEl?.setText("");
 		this.statusEl?.setText("");
 		for (const b of this.buttons) b.disabled = true;
+		if (this.modelSelect !== null) this.modelSelect.disabled = true;
+		// The draft survives underneath, but its controls over a message would be a lie.
+		this.editBar?.hide();
+		this.editBtn?.show();
 	}
 
 	paint(frame: Frame): void {
@@ -301,20 +441,25 @@ export class GeorefView extends ItemView implements Surface {
 		if (stage === null || img === null || svg === null) return;
 		this.messageEl?.hide();
 		stage.show();
-		for (const b of this.buttons) b.disabled = false;
+		// The shell owns "this leaf is a create leaf": once the first save lands the layout must
+		// stop saying so, or a restart boots the map back into create mode over its own note.
+		const createCleared = frame.creating === false && this.create !== null;
+		if (createCleared) this.create = null;
 
 		// The readout and status are cheap and always set. The transform is set when the viewport
 		// moved. The overlay is REBUILT only when its geometry did — the shell hands back the same
-		// `pins` and `lines` arrays until a reload, so reference equality is the whole test — or
-		// when the SCALE changed, because pins and labels are counter-scaled by it. A pan alone
-		// moves the stage and touches nothing inside it: the first version compared the whole
-		// viewport and rebuilt every pin on every pixel of a drag.
+		// `pins`, `lines` and `controlPoints` arrays until something changes, so reference equality
+		// is the whole test — or when the SCALE changed, because pins and labels are counter-scaled
+		// by it. A pan alone moves the stage and touches nothing inside it: the first version
+		// compared the whole viewport and rebuilt every pin on every pixel of a drag.
 		const prev = this.painted;
 		const { width, height } = frame.image;
 		const { scale, offsetX, offsetY } = frame.viewport;
-		const geometryChanged = prev === null || prev.src !== frame.image.src || prev.pins !== frame.pins || prev.lines !== frame.lines || prev.scale !== scale;
+		const draftChanged = prev === null || prev.controlPoints !== frame.controlPoints;
+		const editChanged = prev === null || prev.edit !== frame.edit;
+		const geometryChanged = prev === null || draftChanged || prev.src !== frame.image.src || prev.pins !== frame.pins || prev.lines !== frame.lines || prev.scale !== scale;
 		const viewportChanged = prev === null || prev.viewport !== frame.viewport;
-		this.painted = { src: frame.image.src, pins: frame.pins, lines: frame.lines, scale, viewport: frame.viewport };
+		this.painted = { src: frame.image.src, pins: frame.pins, lines: frame.lines, controlPoints: frame.controlPoints, edit: frame.edit, scale, viewport: frame.viewport };
 
 		if (prev === null || prev.src !== frame.image.src) img.src = frame.image.src;
 		if (viewportChanged) {
@@ -327,6 +472,12 @@ export class GeorefView extends ItemView implements Surface {
 		}
 		this.readoutEl?.setText(frame.readout);
 		this.statusEl?.setText(frame.status);
+		// EVERY paint, not only when the edit state moved: the first version re-enabled every
+		// button on each paint and synced the editor's enable states only on a change, so the
+		// first hover after any edit showed Save enabled on a clean draft.
+		this.syncToolbar(frame);
+		// The layout holds the draft and the create flag, so a change to either is worth a save.
+		if (draftChanged || editChanged || createCleared) this.app.workspace.requestSaveLayout();
 		if (!geometryChanged) return;
 
 		svg.setAttribute("width", String(width));
@@ -375,9 +526,69 @@ export class GeorefView extends ItemView implements Surface {
 			label.setAttribute("y", String(PIN_RADIUS));
 			label.textContent = pin.label;
 		}
+		// Control points last, over everything: while editing they are what the user is working on.
+		for (const cp of frame.controlPoints) {
+			const g = svg.createSvg("g");
+			g.setAttribute("transform", `translate(${cp.x} ${cp.y}) scale(${1 / scale})`);
+			const classes = ["geb-cp"];
+			if (cp.selected) classes.push("geb-cp-selected");
+			if (cp.worst) classes.push("geb-cp-worst");
+			const mark = g.createSvg("rect", { cls: classes.join(" ") });
+			mark.setAttribute("x", String(-CP_HALF));
+			mark.setAttribute("y", String(-CP_HALF));
+			mark.setAttribute("width", String(2 * CP_HALF));
+			mark.setAttribute("height", String(2 * CP_HALF));
+			const label = g.createSvg("text", { cls: "geb-cp-label" });
+			label.setAttribute("x", String(LABEL_OFFSET));
+			label.setAttribute("y", String(-CP_HALF));
+			label.textContent = cp.errorPx === null ? cp.label : `${cp.label} · ${cp.errorPx.toFixed(1)} px`;
+		}
+	}
+
+	/** Show the editing controls or the Edit button, and enable exactly what the state allows. */
+	private syncToolbar(frame: Frame): void {
+		const edit = frame.edit;
+		for (const b of this.buttons) b.disabled = false;
+		if (edit === null) {
+			this.editBar?.hide();
+			this.editBtn?.show();
+			if (this.editBtn !== null) this.editBtn.disabled = !frame.canEdit;
+			return;
+		}
+		this.editBtn?.hide();
+		this.editBar?.show();
+		if (this.modelSelect !== null) this.modelSelect.value = edit.model;
+		if (this.modelSelect !== null) this.modelSelect.disabled = edit.saving;
+		const noSelection = edit.selected === null || edit.saving;
+		if (this.editPointBtn !== null) this.editPointBtn.disabled = noSelection;
+		if (this.deletePointBtn !== null) this.deletePointBtn.disabled = noSelection;
+		if (this.saveBtn !== null) this.saveBtn.disabled = edit.saving || !edit.fittable || !edit.dirty;
+		if (this.discardBtn !== null) this.discardBtn.disabled = edit.saving;
 	}
 
 	openNote(path: string): void {
 		void this.app.workspace.openLinkText(path, "", false);
 	}
+}
+
+const MODEL_KINDS: ReadonlySet<string> = new Set(MODELS.map((m) => m.kind));
+
+function readCreate(raw: unknown): CreateSource | null {
+	const c = raw as Partial<CreateSource> | null | undefined;
+	if (typeof c?.imagePath !== "string" || typeof c.notePath !== "string") return null;
+	return { imagePath: c.imagePath, notePath: c.notePath };
+}
+
+function readDraft(raw: unknown): Draft | null {
+	const d = raw as { model?: unknown; points?: unknown } | null | undefined;
+	if (typeof d?.model !== "string" || !MODEL_KINDS.has(d.model) || !Array.isArray(d.points)) return null;
+	const points: ControlPoint[] = [];
+	for (const p of d.points as unknown[]) {
+		const q = p as Partial<ControlPoint> | null;
+		if (q === null || typeof q !== "object") continue;
+		const { px, py, lat, lng, label } = q;
+		if (![px, py, lat, lng].every((n) => typeof n === "number" && Number.isFinite(n))) continue;
+		points.push(typeof label === "string" && label !== "" ? { px: px!, py: py!, lat: lat!, lng: lng!, label } : { px: px!, py: py!, lat: lat!, lng: lng! });
+	}
+	return { model: d.model as TransformKind, points };
 }

@@ -218,6 +218,19 @@ export interface GebAPI {
 	 * have" check.
 	 */
 	readonly generation: number;
+	/**
+	 * The fewest control points each model can be fitted from at all. *(API 1)*
+	 *
+	 * On the surface because the editor needs it: a fenced view cannot reach the kernel's
+	 * constant, and parsing `previewFit`'s "needs at least 3" message for the number would be
+	 * the wrong kind of coupling. Frozen.
+	 */
+	readonly minPoints: Readonly<Record<TransformKind, number>>;
+	/**
+	 * The count below which a model is fittable but its residuals carry no information: an affine
+	 * fit over exactly three points reproduces them whatever the coordinates say. *(API 1)*
+	 */
+	readonly recommendedPoints: Readonly<Record<TransformKind, number>>;
 
 	listCrs(): readonly CrsInfo[];
 	getCrs(id: string): CrsInfo | null;

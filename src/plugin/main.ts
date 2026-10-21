@@ -1,17 +1,23 @@
-import { debounce, Notice, Plugin, TFile, type Debouncer, type EventRef } from "obsidian";
+import { debounce, normalizePath, Notice, Plugin, TFile, type Debouncer, type EventRef } from "obsidian";
 import { ApiController } from "../api/controller";
 import type { GebAPI } from "../api/types";
 import { reconcile, type ReconcileOutcome } from "../persist/reconcile";
 import { handleRename } from "../persist/rename";
 import type { VaultPort } from "../persist/types";
+import { CreateGeorefModal, type CreateChoice } from "../view/modals";
+import type { CreateSource } from "../view/shell";
 import { GeorefView, VIEW_TYPE } from "../view/view";
-import { ObsidianVault } from "./vault-adapter";
+import { IMAGE_EXTENSIONS, ObsidianVault } from "./vault-adapter";
 
 /**
  * The one place the plugin's display name lives. Wadjet scatters its display name
  * across seven call sites while its id says something else; Geb does not repeat that.
  */
 export const DISPLAY_NAME = "U+1316C Georeference";
+
+function isImage(file: TFile): boolean {
+	return IMAGE_EXTENSIONS.has(file.extension.toLowerCase());
+}
 
 export default class GebPlugin extends Plugin {
 	private vault: VaultPort | null = null;
@@ -60,6 +66,30 @@ export default class GebPlugin extends Plugin {
 				return true;
 			},
 		});
+		// THE WAY IN FOR AN IMAGE WITH NO NOTE. Offered when the active file is an image, and from
+		// the file explorer's menu on one — a note-side affordance was deferred from stage B to
+		// here. An image that already has a map opens that map rather than starting a second.
+		this.addCommand({
+			id: "georeference-image",
+			name: "Georeference this image",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (file === null || !isImage(file) || this.api?.ready !== true) return false;
+				if (!checking) void this.georeference(file);
+				return true;
+			},
+		});
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu, file) => {
+				if (!(file instanceof TFile) || !isImage(file) || this.api?.ready !== true) return;
+				menu.addItem((item) =>
+					item
+						.setTitle("Georeference this image")
+						.setIcon("map")
+						.onClick(() => void this.georeference(file)),
+				);
+			}),
+		);
 
 		// Geb owns rename handling outright: the metadata cache's `changed` event explicitly does
 		// not fire on rename, so this is the only notification there is.
@@ -121,6 +151,57 @@ export default class GebPlugin extends Plugin {
 		return api.listGeorefs().find((g) => g.notePath === file.path)?.id ?? null;
 	}
 
+	/** The id of the loaded georeference whose image is `path`, through the public API, or null. */
+	private georefIdOfImage(api: GebAPI, path: string): string | null {
+		for (const g of api.listGeorefs()) {
+			try {
+				if (api.getImageInfo(g.id).path === path) return g.id;
+			} catch {
+				// A map that vanished between the two calls: not this image's, either way.
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Open the editor on an image. Its existing map if it has one; otherwise ask once where the
+	 * note goes and what the id is, prefilled from the image's name, and open the view in its
+	 * no-note-yet mode. Nothing is written until the user saves their first points.
+	 */
+	private async georeference(file: TFile): Promise<void> {
+		const api = this.api;
+		if (api === null || !api.ready) return;
+		const existing = this.georefIdOfImage(api, file.path);
+		if (existing !== null) {
+			await this.openView(existing);
+			return;
+		}
+		// An unsaved create leaf for this image is invisible to the index; a second one would
+		// let two notes be written for one image. Reveal the one already open instead.
+		const started = this.app.workspace
+			.getLeavesOfType(VIEW_TYPE)
+			.find((l) => (l.getViewState().state?.create as Partial<CreateSource> | undefined)?.imagePath === file.path);
+		if (started !== undefined) {
+			await this.app.workspace.revealLeaf(started);
+			this.app.workspace.setActiveLeaf(started, { focus: true });
+			return;
+		}
+		const folder = file.parent === null || file.parent.path === "/" ? "" : `${file.parent.path}/`;
+		const defaults: CreateChoice = { id: file.basename, notePath: normalizePath(`${folder}${file.basename}.md`) };
+		const refuse = (choice: CreateChoice): string | null => {
+			try {
+				if (api.getGeoref(choice.id) !== null) return `Another note already claims the id "${choice.id}".`;
+			} catch (e) {
+				return e instanceof Error ? e.message : String(e);
+			}
+			if (this.app.vault.getAbstractFileByPath(normalizePath(choice.notePath)) !== null) return `A file already exists at ${choice.notePath}.`;
+			return null;
+		};
+		new CreateGeorefModal(this.app, defaults, refuse, (choice) => {
+			void this.openView(choice.id, { imagePath: file.path, notePath: normalizePath(choice.notePath) });
+		}).open();
+	}
+
 	/**
 	 * Reveal the leaf already showing this map, or open a new one. One leaf per map, never two.
 	 *
@@ -130,13 +211,16 @@ export default class GebPlugin extends Plugin {
 	 * cases, and a view that cannot recognise its own leaf opens a duplicate. The state is what the
 	 * workspace layout stored, and it is the same whichever class is behind the leaf.
 	 */
-	private async openView(georefId: string): Promise<void> {
+	private async openView(georefId: string, create?: CreateSource): Promise<void> {
 		const existing = this.app.workspace
 			.getLeavesOfType(VIEW_TYPE)
 			.find((l) => l.getViewState().state?.georefId === georefId);
 		const leaf = existing ?? this.app.workspace.getLeaf(true);
-		if (existing === undefined) {
+		// A leaf already on this id may be sitting on "no such georeference" from an earlier
+		// attempt; a create for the same id must hand it the image, not merely reveal it.
+		if (existing === undefined || create !== undefined) {
 			const state: Record<string, unknown> = { georefId };
+			if (create !== undefined) state.create = create;
 			await leaf.setViewState({ type: VIEW_TYPE, state, active: true });
 		}
 		await this.app.workspace.revealLeaf(leaf);

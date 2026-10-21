@@ -4,15 +4,16 @@
  * A map view's bugs are invisible by eye and obvious to an assertion, which is why stage A split
  * the arithmetic out of the element. This file is the next layer up: everything the view decides
  * — what to load, when to reload, where each pin and graticule line sits in image pixels, what the
- * readout says, how a wheel or a drag moves the viewport — happens here against the public API
- * and a small `Surface` it paints onto. The Obsidian `ItemView` in view.ts is a thin adapter that
- * implements `Surface` with real elements; the tests implement it with a recorder and drive this
- * class over the same `ApiController` and fake vault the API tests use. Nothing here imports
- * `obsidian`, so it runs under `bun test`.
+ * readout says, how a wheel or a drag moves the viewport, what a tap means while editing — happens
+ * here against the public API and a small `Surface` it paints onto. The Obsidian `ItemView` in
+ * view.ts is a thin adapter that implements `Surface` with real elements; the tests implement it
+ * with a recorder and drive this class over the same `ApiController` and fake vault the API tests
+ * use. Nothing here imports `obsidian`, so it runs under `bun test`.
  *
  * THE DOGFOODING GATE APPLIES. This file reaches Geb only through `GebAPI`; the eslint fence
  * forbids everything else. Where the API was awkward, the answer was to change the API — which
- * stage A found once already, and which this stage exists to find again.
+ * stage A found once already, and which this stage exists to find again. Stage C found two more:
+ * the minimum and recommended point counts, which the editor needs and the surface did not carry.
  *
  * FRAMES ARE IN IMAGE PIXELS PLUS A VIEWPORT, not in screen pixels. The surface applies the
  * viewport as one transform on a stage holding the image and the overlay, so a pin computed once
@@ -29,12 +30,25 @@
  * a state here. Entering it clears the map, which makes every public method a no-op by the same
  * `image === null` guard, and leaving it is a first placement again. The size precondition is
  * handled by refusing to fit against an empty surface and fitting on the next resize instead.
+ *
+ * THE EDITOR IS A DRAFT, SAVED ONCE. Control points live here while a user places them, each
+ * placement is fitted through `previewFit` (no vault, never throws) so the residuals are live, and
+ * one `createGeoref` or `updateGeoref` commits the lot. The API's own guidance, and the only shape
+ * that works: a new map cannot be persisted below its model's minimum point count, and a saved
+ * map's every edit would otherwise be a disk write plus a full refit per click. The saved fit
+ * stays on screen underneath the draft — its graticule and readout are the sanity check — while
+ * the draft's own markers carry the affine residual of the fit they would make.
+ *
+ * A MAP WITH NO NOTE YET is the one case the API cannot describe, so the shell is handed the image
+ * path directly, asks the surface to measure it (only a DOM can decode an image), and shows it
+ * with no fit until the first save. From then on it is an ordinary map waiting for Obsidian's
+ * change event — the index describes the pre-write state until that arrives, by design.
  */
 import { isCodedError } from "../api/errors";
-import type { FitInfo, GebAPI, GebEventPayload, ImageInfo, LatLng, Pixel, PinInfo } from "../api/types";
+import type { ControlPoint, FitInfo, FitPreview, GebAPI, GebEventPayload, LatLng, Pixel, PinInfo, TransformKind } from "../api/types";
 import { coordinate, trust } from "./format";
 import { graticule as planGraticule, label as graticuleLabel } from "./graticule";
-import { pinAt, uncertaintyRadius } from "./pins";
+import { nearestIndex, pinAt, uncertaintyRadius } from "./pins";
 import { fitToContainer, IDENTITY, insideImage, panBy, toImage, zoomAbout, type Size, type Viewport } from "./viewport";
 
 /** A pin to draw, in image pixels. */
@@ -62,12 +76,52 @@ export interface FrameLine {
 	readonly points: readonly Pixel[];
 }
 
+/** A draft control point to draw, in image pixels. */
+export interface FrameControlPoint {
+	readonly x: number;
+	readonly y: number;
+	readonly label: string;
+	readonly selected: boolean;
+	/**
+	 * The affine residual of the draft's fit at this point, in image pixels — or null while the
+	 * draft cannot be fitted OR has too few points for the number to mean anything. An affine fit
+	 * over exactly three points reproduces them whatever the coordinates say, and a marker reading
+	 * "0.0 px" beside a mistyped coordinate is the confident lie this plugin exists to avoid.
+	 */
+	readonly errorPx: number | null;
+	/** The point with the largest residual, where a user should look first. */
+	readonly worst: boolean;
+}
+
+/** The editor's state, for the toolbar. Null when not editing. */
+export interface FrameEdit {
+	readonly model: TransformKind;
+	readonly crs: string;
+	readonly pointCount: number;
+	readonly minPoints: number;
+	readonly selected: number | null;
+	/** The draft fits, so Save is possible. */
+	readonly fittable: boolean;
+	readonly dirty: boolean;
+	readonly saving: boolean;
+	/** The map has no note yet. */
+	readonly creating: boolean;
+}
+
 /** Everything the surface needs to paint one state of the view. Plain data. */
 export interface Frame {
 	readonly image: { readonly src: string; readonly width: number; readonly height: number };
 	readonly viewport: Viewport;
 	readonly pins: readonly FramePin[];
 	readonly lines: readonly FrameLine[];
+	/** The draft's control points. Empty when not editing. Same array until the draft changes. */
+	readonly controlPoints: readonly FrameControlPoint[];
+	/** Same object until the editor's state changes, so the adapter can skip the toolbar. */
+	readonly edit: FrameEdit | null;
+	/** The map has no note yet. The adapter's layout state follows this, not its own copy. */
+	readonly creating: boolean;
+	/** Whether "Edit" may be offered: a loaded fit, no draft, and no write awaiting the index. */
+	readonly canEdit: boolean;
 	/** The hover readout, or an empty string when the pointer is not over the image. */
 	readonly readout: string;
 	/** The trust summary for the status line. */
@@ -86,11 +140,38 @@ export interface Surface {
 	size(): Size;
 	/** Turn a vault path into something an `<img>` can load. The only Obsidian plumbing. */
 	imageSrc(path: string): string;
+	/**
+	 * The natural size of the image at `src`. Only a DOM can decode an image, and a map with no
+	 * note yet has no stored size — `createGeoref` demands one. Rejects when it cannot load.
+	 */
+	measureImage(src: string): Promise<Size>;
 	paint(frame: Frame): void;
 	/** Replace the map with a message: not ready, no such map, unloaded. */
 	message(text: string): void;
 	openNote(path: string): void;
 }
+
+/** An image with no georeference note yet, and where its note will go once it has one. */
+export interface CreateSource {
+	readonly imagePath: string;
+	readonly notePath: string;
+}
+
+/** The in-progress edit, as the workspace layout remembers it across a restart. */
+export interface Draft {
+	readonly model: TransformKind;
+	readonly points: readonly ControlPoint[];
+}
+
+/** What a tap meant. The adapter acts on it; the shell decides it. */
+export type Tap =
+	| { readonly kind: "miss" }
+	| { readonly kind: "note"; readonly notePath: string }
+	| { readonly kind: "selected"; readonly index: number }
+	/** Editing, on empty image: the adapter should ask for the coordinate of this pixel. */
+	| { readonly kind: "place"; readonly pixel: Pixel };
+
+const MISS: Tap = { kind: "miss" };
 
 /** Zoom bounds relative to the fit-to-container scale, so they mean the same on any image. */
 const ZOOM_OUT_LIMIT = 0.25;
@@ -108,13 +189,31 @@ export const PIN_HIT_RADIUS_TOUCH_CSS = 22;
 const LINE_SAMPLES = 32;
 /** Grid of pixels probed to learn what world region the image pictures. */
 const REGION_SAMPLES = 4;
+/** A new map starts as a spline: a hand-drawn map has warp, and at three points a spline IS affine. */
+export const DEFAULT_MODEL: TransformKind = "tps";
+const DEFAULT_CRS = "earth";
 
 export const MESSAGES = {
 	indexing: "Waiting for Obsidian to finish indexing the vault.",
 	unloaded: "Geb has been unloaded. Reopen this view once it is enabled again.",
 	noImage: (id: string): string => `The image for "${id}" does not resolve. Check the link in its georeference note.`,
 	noGeoref: (id: string): string => `No georeference with id "${id}" is loaded.`,
+	badImage: (path: string): string => `The image at "${path}" could not be loaded.`,
 } as const;
+
+export const STATUS = {
+	saving: "Saving…",
+	saved: "Saved. Waiting for Obsidian to index the note.",
+	unsaved: "unsaved",
+	failed: (reason: string): string => `Save failed: ${reason}`,
+} as const;
+
+interface EditState {
+	readonly model: TransformKind;
+	readonly points: readonly ControlPoint[];
+	readonly selected: number | null;
+	readonly preview: FitPreview;
+}
 
 export class MapShell {
 	private viewport: Viewport = IDENTITY;
@@ -125,9 +224,11 @@ export class MapShell {
 	private pendingFit = false;
 
 	private notePath: string | null = null;
+	private crs = DEFAULT_CRS;
 	/** Non-null exactly when a map is on screen. Every public method is a no-op otherwise. */
-	private image: ImageInfo | null = null;
+	private image: { readonly path: string; readonly width: number; readonly height: number } | null = null;
 	private src = "";
+	/** Null while the map has no note, or has one the index has not loaded yet. */
 	private fit: FitInfo | null = null;
 	private pins: readonly PinInfo[] = [];
 	/**
@@ -141,6 +242,29 @@ export class MapShell {
 	private lines: readonly FrameLine[] = [];
 	private hover: Pixel | null = null;
 
+	/** Set while the map has no note. Cleared the moment `createGeoref` resolves. */
+	private create: CreateSource | null;
+	private edit: EditState | null = null;
+	/** Same two objects until the draft changes, for the same reason as `framePins`. */
+	private frameControlPoints: readonly FrameControlPoint[] = [];
+	private frameEdit: FrameEdit | null = null;
+	private saving = false;
+	/**
+	 * WHAT WAS WRITTEN, while the index has not yet handed it back. A state, not a flag: while it
+	 * is set the map on screen is known to be stale, so editing is refused (a draft begun from the
+	 * stale fit would overwrite the write that just landed), a change event for some other note
+	 * must not read as "no such georeference", and the status says what is being waited for. It
+	 * clears when a load returns the same content — never on a timer, and never on an event alone,
+	 * because an event can arrive before the write resolves and the index can still be behind.
+	 */
+	private pending: Draft | null = null;
+	/** Where on the point the user pressed, so a drag moves the point by the pointer's motion. */
+	private grabOffset: Pixel = { x: 0, y: 0 };
+	/** Why the last save failed, until the next edit or save attempt. */
+	private problem: string | null = null;
+	/** Which `measureImage` answer is still wanted: a reload or a close orphans earlier ones. */
+	private measureGen = 0;
+
 	private unsubscribes: (() => void)[] = [];
 	private closed = false;
 
@@ -148,7 +272,14 @@ export class MapShell {
 		private readonly api: GebAPI,
 		readonly georefId: string,
 		private readonly surface: Surface,
-	) {}
+		options: { readonly create?: CreateSource; readonly draft?: Draft } = {},
+	) {
+		this.create = options.create ?? null;
+		// A map with no note is only ever here to be edited, so it starts editing; a restored
+		// draft resumes whatever was in progress, note or no note.
+		if (options.draft !== undefined) this.setEdit(options.draft.model, options.draft.points, null);
+		else if (this.create !== null) this.setEdit(DEFAULT_MODEL, [], null);
+	}
 
 	// --- lifecycle -------------------------------------------------------------------------
 
@@ -173,6 +304,7 @@ export class MapShell {
 
 	close(): void {
 		this.closed = true;
+		this.measureGen++;
 		for (const off of this.unsubscribes) off();
 		this.unsubscribes = [];
 	}
@@ -208,8 +340,18 @@ export class MapShell {
 	 * Read everything from the API and paint. Every read is a synchronous snapshot, so one call
 	 * cannot observe a half-updated world; the viewport survives a reload unless this is the
 	 * first time the image has been placed — which includes coming back from a message.
+	 *
+	 * A MAP WITH NO NOTE has nothing to read: the API cannot describe an image nobody has
+	 * georeferenced, so the shell places the image on its own and lets the draft carry on. The
+	 * same is true for the moment after its first save, when the note exists on disk and the
+	 * index still describes a world without it — a change event for some other note must not
+	 * turn that moment into "no such georeference" and throw the image away.
 	 */
 	private load(): void {
+		if (this.create !== null) {
+			this.placeImage(this.create.imagePath);
+			return;
+		}
 		if (!this.api.ready) {
 			this.showMessage(MESSAGES.indexing);
 			return;
@@ -217,10 +359,15 @@ export class MapShell {
 		try {
 			const summary = this.api.getGeoref(this.georefId);
 			if (summary === null) {
+				if (this.pending !== null && this.image !== null) {
+					this.paint();
+					return;
+				}
 				this.showMessage(MESSAGES.noGeoref(this.georefId));
 				return;
 			}
 			this.notePath = summary.notePath;
+			this.crs = summary.crs;
 			const image = this.api.getImageInfo(this.georefId);
 			if (image.path === null) {
 				this.showMessage(MESSAGES.noImage(this.georefId));
@@ -230,9 +377,13 @@ export class MapShell {
 			this.pins = this.api.featuresIn(this.georefId) ?? [];
 			this.framePins = this.pins.map((p) => this.framePin(p));
 			const firstPlacement = this.image === null;
-			this.image = image;
+			this.image = { path: image.path, width: image.width, height: image.height };
 			this.src = this.surface.imageSrc(image.path);
 			this.lines = this.planLines();
+			if (this.caughtUp()) this.pending = null;
+			// A restored draft was fitted before the map loaded; now the lambda and the dirty
+			// comparison have something to be relative to.
+			if (this.edit !== null) this.setEdit(this.edit.model, this.edit.points, this.edit.selected, false);
 			if (firstPlacement) this.fitImage();
 			else this.paint();
 		} catch (e) {
@@ -242,10 +393,57 @@ export class MapShell {
 		}
 	}
 
+	/** The index has handed back what was written, so the map on screen is no longer stale. */
+	private caughtUp(): boolean {
+		const p = this.pending;
+		const f = this.fit;
+		if (p === null) return true;
+		return f !== null && f.model === p.model && samePoints(f.points, p.points);
+	}
+
+	/**
+	 * Show an image the API knows nothing about. The surface decodes it, asynchronously, and
+	 * only the answer to the LATEST request is used: a close or a second load in between makes
+	 * an earlier answer a message from a world that no longer exists.
+	 */
+	private placeImage(path: string): void {
+		const src = this.surface.imageSrc(path);
+		if (this.image !== null && this.src === src) {
+			this.paint();
+			return;
+		}
+		const gen = ++this.measureGen;
+		void this.surface.measureImage(src).then(
+			(size) => {
+				if (gen !== this.measureGen) return;
+				if (!(size.height > 0 && size.width > 0)) {
+					this.showMessage(MESSAGES.badImage(path));
+					return;
+				}
+				const first = this.image === null;
+				this.image = { path, width: size.width, height: size.height };
+				this.src = src;
+				this.fit = null;
+				this.notePath = null;
+				this.pins = [];
+				this.framePins = [];
+				this.lines = [];
+				if (first) this.fitImage();
+				else this.paint();
+			},
+			() => {
+				if (gen === this.measureGen) this.showMessage(MESSAGES.badImage(path));
+			},
+		);
+	}
+
 	/**
 	 * Enter the message state: the map is GONE, not merely covered. With `image` null every
 	 * public method returns at its first line, so a toolbar click or a stray hover cannot paint a
 	 * dead map back over the message. Coming back is a first placement, and refits.
+	 *
+	 * The DRAFT SURVIVES. A message is Geb unloading or the vault still indexing, and a user's
+	 * twenty placed points are not the thing to lose over that; they come back with the image.
 	 */
 	private showMessage(text: string): void {
 		this.image = null;
@@ -356,42 +554,344 @@ export class MapShell {
 	}
 
 	/**
-	 * A tap or click at `at` in CSS pixels. Opens the nearest pin's note within `hitRadiusCss`
-	 * and returns whether one was hit, so the adapter can decide what an unhit tap means on a
-	 * touch screen — and can pass a finger-sized radius for one.
+	 * A tap or click at `at` in CSS pixels, within `hitRadiusCss` — the adapter passes a
+	 * finger-sized radius for a touch. Viewing: opens the nearest pin's note. Editing: selects the
+	 * nearest draft point, or asks for a new one on empty image. The editor owns every tap, so a
+	 * place pin under a draft is not opened — a user placing points is not reading notes.
 	 */
-	tap(at: Pixel, hitRadiusCss: number = PIN_HIT_RADIUS_CSS): boolean {
-		if (this.image === null) return false;
+	tap(at: Pixel, hitRadiusCss: number = PIN_HIT_RADIUS_CSS): Tap {
+		if (this.image === null) return MISS;
 		const img = toImage(this.viewport, at);
-		if (img === null) return false;
+		if (img === null) return MISS;
+		if (this.edit !== null) {
+			const i = this.draftPointAt(img, hitRadiusCss);
+			// Mid-save the draft is being written: nothing may change it, so a tap means nothing.
+			if (this.saving) return MISS;
+			if (i !== null) {
+				this.select(i);
+				return { kind: "selected", index: i };
+			}
+			if (!insideImage(this.image, img)) return MISS;
+			return { kind: "place", pixel: img };
+		}
 		const hit = pinAt(this.pins, img, hitRadiusCss / this.viewport.scale);
-		if (hit === null) return false;
+		if (hit === null) return MISS;
 		this.surface.openNote(hit.feature.notePath);
-		return true;
+		return { kind: "note", notePath: hit.feature.notePath };
+	}
+
+	/**
+	 * A press at `at` while editing: the index of the draft point under it, now selected, or null.
+	 * The adapter turns a drag that began on a point into `movePoint` calls instead of a pan.
+	 */
+	grab(at: Pixel, hitRadiusCss: number = PIN_HIT_RADIUS_CSS): number | null {
+		if (this.locked) return null;
+		const img = toImage(this.viewport, at);
+		if (img === null) return null;
+		const i = this.draftPointAt(img, hitRadiusCss);
+		const p = i === null ? undefined : this.edit?.points[i];
+		if (i !== null && p !== undefined) {
+			// The press is rarely dead centre; without the offset the point jumps under the pointer
+			// on the first moved pixel, and under a finger that is a jump the finger then hides.
+			this.grabOffset = { x: p.px - img.x, y: p.py - img.y };
+			this.select(i);
+		}
+		return i;
+	}
+
+	private draftPointAt(img: Pixel, hitRadiusCss: number): number | null {
+		if (this.edit === null) return null;
+		return nearestIndex(
+			this.edit.points.map((p) => ({ x: p.px, y: p.py })),
+			img,
+			hitRadiusCss / this.viewport.scale,
+		);
 	}
 
 	private readout(): string {
 		if (this.hover === null || this.image === null) return "";
 		const img = toImage(this.viewport, this.hover);
 		if (img === null || !insideImage(this.image, img)) return "";
+		// While editing, the pixel is the thing being chosen, so it is shown — and for a map with
+		// no fit yet it is all there is to show.
+		const px = this.edit === null ? "" : `${Math.round(img.x)}, ${Math.round(img.y)} px`;
+		const world = this.worldReadout(img);
+		if (world === "") return px;
+		return px === "" ? world : `${world} · ${px}`;
+	}
+
+	private worldReadout(img: Pixel): string {
+		if (this.fit === null) return "";
 		const w = this.api.toLatLng(this.georefId, img.x, img.y);
 		// Off the edge of where the transform means anything: say nothing rather than a number.
 		if (w === null) return "";
 		return coordinate(w) + (w.extrapolated ? " · extrapolated" : "");
 	}
 
+	// --- editing -----------------------------------------------------------------------------
+
+	/** The draft, for the workspace layout to remember. Null when not editing. */
+	get draft(): Draft | null {
+		return this.edit === null ? null : { model: this.edit.model, points: this.edit.points };
+	}
+
+	/** True until the first save of a map that had no note. The adapter's layout state follows it. */
+	get creating(): boolean {
+		return this.create !== null;
+	}
+
+	/**
+	 * Nothing may change the draft when there is none, when no map is on screen, or while it is
+	 * being written — an edit landing mid-write would be neither in the file nor on screen.
+	 */
+	private get locked(): boolean {
+		return this.edit === null || this.image === null || this.saving;
+	}
+
+	/**
+	 * Start editing the loaded fit's points. Refused while a write awaits the index: the fit on
+	 * screen is the PRE-write one, and a draft copied from it would carry the old points straight
+	 * back over the save that just landed. The adapter disables the button on the same condition.
+	 */
+	beginEdit(): void {
+		if (this.image === null || this.edit !== null || this.pending !== null || this.saving) return;
+		this.setEdit(this.fit?.model ?? DEFAULT_MODEL, this.fit?.points ?? [], null);
+	}
+
+	/**
+	 * Drop the draft. For a saved map the loaded fit is still on screen and nothing was written;
+	 * for a map with no note the points are gone and the image stays, ready for a fresh start.
+	 */
+	discardEdit(): void {
+		if (this.edit === null || this.saving) return;
+		this.problem = null;
+		if (this.create !== null) {
+			this.setEdit(this.edit.model, [], null);
+			return;
+		}
+		this.edit = null;
+		this.frameControlPoints = [];
+		this.frameEdit = null;
+		this.paint();
+	}
+
+	setModel(model: TransformKind): void {
+		if (this.locked || this.edit === null) return;
+		this.setEdit(model, this.edit.points, this.edit.selected);
+	}
+
+	/** Append a point, selected. The adapter calls this once the user has given a coordinate. */
+	placePoint(point: ControlPoint): void {
+		if (this.locked || this.edit === null) return;
+		this.setEdit(this.edit.model, [...this.edit.points, this.clamp(point)], this.edit.points.length);
+	}
+
+	replacePoint(index: number, point: ControlPoint): void {
+		if (this.locked || this.edit === null || this.edit.points[index] === undefined) return;
+		const next = this.clamp(point);
+		const points = this.edit.points.map((p, i) => (i === index ? next : p));
+		this.setEdit(this.edit.model, points, index);
+	}
+
+	deletePoint(index: number): void {
+		if (this.locked || this.edit === null || this.edit.points[index] === undefined) return;
+		const points = this.edit.points.filter((_, i) => i !== index);
+		this.setEdit(this.edit.model, points, null);
+	}
+
+	select(index: number | null): void {
+		if (this.locked || this.edit === null) return;
+		const next = index !== null && this.edit.points[index] === undefined ? null : index;
+		if (next === this.edit.selected) return;
+		this.setEdit(this.edit.model, this.edit.points, next);
+	}
+
+	/**
+	 * Move a point's pixel with the pointer, in CSS pixels, keeping its coordinate and the offset
+	 * the press began with. The readout follows the pointer as it does through a pan.
+	 */
+	movePoint(index: number, at: Pixel): void {
+		if (this.locked || this.edit === null) return;
+		const p = this.edit.points[index];
+		if (p === undefined) return;
+		const img = toImage(this.viewport, at);
+		if (img === null) return;
+		this.hover = at;
+		this.replacePoint(index, { ...p, px: img.x + this.grabOffset.x, py: img.y + this.grabOffset.y });
+	}
+
+	/** A point off the edge sits on the edge rather than off the map, however it got there. */
+	private clamp(p: ControlPoint): ControlPoint {
+		const image = this.image;
+		if (image === null) return p;
+		const px = Math.min(image.width, Math.max(0, p.px));
+		const py = Math.min(image.height, Math.max(0, p.py));
+		return px === p.px && py === p.py ? p : { ...p, px, py };
+	}
+
+	/**
+	 * Commit the draft through the public API, once. Resolves to whether it was written; the
+	 * reason it was not is in the status line, and the draft stays so the user can fix it.
+	 *
+	 * AFTER A SAVE THE SCREEN MAY NOT CHANGE YET. The index describes the pre-write state until
+	 * Obsidian's own change event arrives — the API's documented contract — so the shell records
+	 * what it wrote as `pending`, says so in the status, and loads once more straight away: if the
+	 * event beat the write's own promise, which nothing forbids, that load is the one that finds
+	 * the new fit, and waiting for a further event would wait forever.
+	 */
+	async save(): Promise<boolean> {
+		const e = this.edit;
+		if (e === null || this.image === null || this.saving || !e.preview.ok) return false;
+		this.saving = true;
+		this.problem = null;
+		this.refreshEdit();
+		this.paint();
+		let written = false;
+		try {
+			const lambda = this.fit?.lambda;
+			if (this.create !== null) {
+				await this.api.createGeoref({
+					notePath: this.create.notePath,
+					id: this.georefId,
+					imagePath: this.create.imagePath,
+					imageWidth: this.image.width,
+					imageHeight: this.image.height,
+					crs: this.crs,
+					model: e.model,
+					points: e.points,
+				});
+				this.create = null;
+			} else {
+				await this.api.updateGeoref(this.georefId, {
+					model: e.model,
+					points: e.points,
+					...(lambda === undefined ? {} : { lambda }),
+				});
+			}
+			this.pending = { model: e.model, points: e.points };
+			this.edit = null;
+			this.frameControlPoints = [];
+			this.frameEdit = null;
+			written = true;
+			return true;
+		} catch (err) {
+			this.problem = errorText(err);
+			return false;
+		} finally {
+			this.saving = false;
+			this.refreshEdit();
+			if (!this.closed) {
+				if (written) this.load();
+				else this.paint();
+			}
+		}
+	}
+
+	/**
+	 * The one place the draft changes. Fits it, rebuilds the two frame objects the adapter
+	 * compares by reference, and paints. `previewFit` never throws for bad points — a degenerate
+	 * draft is an ordinary state — but it does throw once Geb is unloaded, and a restored draft
+	 * can arrive before anything has checked that; the result shape absorbs it.
+	 */
+	private setEdit(model: TransformKind, points: readonly ControlPoint[], selected: number | null, repaint = true): void {
+		const lambda = this.fit?.lambda;
+		let preview: FitPreview;
+		try {
+			preview = this.api.previewFit(points, { kind: model, ...(lambda === undefined ? {} : { lambda }) });
+		} catch (err) {
+			preview = { ok: false, code: isCodedError(err) ? err.code : "geb-bad-argument", message: errorText(err) };
+		}
+		this.edit = { model, points, selected, preview };
+		this.problem = null;
+		this.frameControlPoints = this.controlPointFrames(this.edit);
+		this.refreshEdit();
+		if (repaint) this.paint();
+	}
+
+	private refreshEdit(): void {
+		const e = this.edit;
+		if (e === null) {
+			this.frameEdit = null;
+			return;
+		}
+		this.frameEdit = {
+			model: e.model,
+			crs: this.crs,
+			pointCount: e.points.length,
+			minPoints: this.api.minPoints[e.model],
+			selected: e.selected,
+			fittable: e.preview.ok,
+			dirty: this.isDirty(),
+			saving: this.saving,
+			creating: this.create !== null,
+		};
+	}
+
+	private isDirty(): boolean {
+		const e = this.edit;
+		if (e === null) return false;
+		if (this.fit === null) return e.points.length > 0;
+		return e.model !== this.fit.model || !samePoints(e.points, this.fit.points);
+	}
+
+	/**
+	 * Residuals are shown only from the count at which they carry information. Below it the
+	 * marker says nothing rather than "0.0 px": the number would be true and worthless.
+	 */
+	private controlPointFrames(e: EditState): readonly FrameControlPoint[] {
+		const informative = e.preview.ok && e.points.length >= this.api.recommendedPoints.affine;
+		const errors = new Map<number, number>();
+		let worst: number | null = null;
+		if (informative && e.preview.ok) {
+			for (const r of e.preview.fit.diagnostics.affine) {
+				errors.set(r.index, r.error);
+				if (worst === null || r.error > (errors.get(worst) ?? 0)) worst = r.index;
+			}
+		}
+		return e.points.map((p, i) => ({
+			x: p.px,
+			y: p.py,
+			label: p.label === undefined || p.label === "" ? `${i + 1}` : p.label,
+			selected: i === e.selected,
+			errorPx: errors.get(i) ?? null,
+			worst: i === worst,
+		}));
+	}
+
 	// --- painting ----------------------------------------------------------------------------
 
 	private paint(): void {
-		if (this.image === null || this.fit === null) return;
+		if (this.image === null) return;
 		this.surface.paint({
 			image: { src: this.src, width: this.image.width, height: this.image.height },
 			viewport: this.viewport,
 			pins: this.framePins,
 			lines: this.lines,
+			controlPoints: this.frameControlPoints,
+			edit: this.frameEdit,
+			creating: this.create !== null,
+			canEdit: this.edit === null && this.pending === null && !this.saving && this.fit !== null,
 			readout: this.readout(),
-			status: trust(this.fit).summary,
+			status: this.status(),
 		});
+	}
+
+	/**
+	 * The status line. While editing it describes the DRAFT's fit — that is what the user is
+	 * shaping — and the kernel's own caveats ride along, so a three-point affine says why its
+	 * residuals are zero without this layer repeating it. A draft outranks "saved, waiting": a
+	 * restored draft on a map still being indexed is the thing the user is looking at.
+	 */
+	private status(): string {
+		if (this.problem !== null) return STATUS.failed(this.problem);
+		if (this.saving) return STATUS.saving;
+		const e = this.edit;
+		if (e !== null) {
+			const base = e.preview.ok ? trust(e.preview.fit).summary : e.preview.message;
+			return this.isDirty() ? `${base} · ${STATUS.unsaved}` : base;
+		}
+		if (this.pending !== null) return STATUS.saved;
+		return this.fit === null ? "" : trust(this.fit).summary;
 	}
 
 	private framePin(p: PinInfo): FramePin {
@@ -521,4 +1021,18 @@ export class MapShell {
 function basename(path: string): string {
 	const file = path.slice(path.lastIndexOf("/") + 1);
 	return file.endsWith(".md") ? file.slice(0, -3) : file;
+}
+
+/** For the status line: the message, without a thrown value's own "Error:" prefix. */
+function errorText(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+/** Field-by-field, so a draft that merely re-orders nothing and re-types nothing is clean. */
+function samePoints(a: readonly ControlPoint[], b: readonly ControlPoint[]): boolean {
+	if (a.length !== b.length) return false;
+	return a.every((p, i) => {
+		const q = b[i]!;
+		return p.px === q.px && p.py === q.py && p.lat === q.lat && p.lng === q.lng && (p.label ?? "") === (q.label ?? "");
+	});
 }
