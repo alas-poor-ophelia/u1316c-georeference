@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { fitMapping, type TpsMapping } from "../src/core/mapping";
 import { affineResiduals, diagnose, tpsLooIndependent, tpsLooRippa } from "../src/core/residuals";
-import { CLEAN, TYPO, TYPO_INDEX } from "./fixtures";
+import { MIN_POINTS, RECOMMENDED_POINTS } from "../src/core/types";
+import { CLEAN, CLEAN_LINEAR, TYPO, TYPO_INDEX } from "./fixtures";
 
 const worst = (rs: readonly { index: number; error: number }[]): number =>
 	rs.reduce((a, b) => (b.error > a.error ? b : a)).index;
@@ -123,5 +124,57 @@ describe("leave-one-out availability", () => {
 
 	test("an affine fit reports no leave-one-out at all", () => {
 		expect(diagnose(CLEAN, { kind: "affine" }).loo).toBeUndefined();
+	});
+});
+
+/**
+ * The exactly-determined case, which is the one point count at which the headline number lies.
+ *
+ * This whole block is the test that was missing: the suite checked affine exactness only at eight
+ * points on linear data, so nothing pinned what happens at the MINIMUM — and the minimum is where
+ * a user starts. `CLEAN_LINEAR` is used throughout because a purely linear truth makes a correct
+ * affine fit exact, so the only error present is the one deliberately injected.
+ */
+describe("the affine display is a tautology at exactly three points", () => {
+	const three = CLEAN_LINEAR.slice(0, 3);
+	/** The same mistake `TYPO` makes, one sign-flipped longitude, about 150 km. */
+	const flip = (ps: readonly (typeof CLEAN_LINEAR)[number][]): typeof three =>
+		ps.map((p, i) => (i === 1 ? { ...p, lng: -p.lng } : p));
+
+	test("a correct affine fit over three points reproduces them exactly", () => {
+		// Three free parameters per axis against three constraints. Measured max 5.1e-13 px.
+		for (const r of affineResiduals(three)) expect(r.error).toBeLessThan(1e-9);
+	});
+
+	test("and so does a WRONG one, which is the hazard", () => {
+		// Measured at 0.0 px on this fixture and at 1.1e-13 px on another — float noise either
+		// way, NOT a tolerance that could be tightened, because the fit has nothing spare to show
+		// the error in. (An earlier version of this comment claimed "exactly 0.0", which is true
+		// of some point sets and not others; the claim worth making is that it is noise-level
+		// whatever the input, which is what the assertion says.) This is why
+		// RECOMMENDED_POINTS.affine moved from 3 to 4.
+		for (const r of affineResiduals(flip(three))) expect(r.error).toBeLessThan(1e-9);
+	});
+
+	test("the identical error at four points is loud", () => {
+		// Measured 145.8 px. The cliff is at exactly three; one spare observation is enough.
+		const worstFour = Math.max(...affineResiduals(flip(CLEAN_LINEAR.slice(0, 4))).map((r) => r.error));
+		expect(worstFour).toBeGreaterThan(100);
+	});
+
+	test("so the caveat is attached at three, and is absent once it is untrue", () => {
+		const atThree = diagnose(flip(three), { kind: "affine" });
+		// FIRST in the list: it voids every other number in the object, and `trust` shows notes[0]
+		// verbatim when there is only one.
+		expect(atThree.notes[0]).toContain("Add a fourth point");
+		const atFour = diagnose(flip(CLEAN_LINEAR.slice(0, 4)), { kind: "affine" });
+		expect(atFour.notes.some((n) => n.includes("Add a fourth point"))).toBe(false);
+	});
+
+	test("and three points is no longer advertised as recommended for affine", () => {
+		// Fittable is not the same as meaningful, and this constant is the only place that
+		// distinction is expressed. Pinned so a revert to 3 fails here rather than in the field.
+		expect(MIN_POINTS.affine).toBe(3);
+		expect(RECOMMENDED_POINTS.affine).toBe(4);
 	});
 });

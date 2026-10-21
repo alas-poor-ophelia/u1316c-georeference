@@ -101,7 +101,20 @@ describe("graticule spacing", () => {
 		const step = chooseStep(span, 4);
 		expect(span / step).toBeGreaterThanOrEqual(4);
 		// And one rung coarser would NOT have given enough — that is what "coarsest" means.
-		expect(span / 15).toBeLessThan(4);
+		//
+		// ASSERTED THROUGH `chooseStep`, because the line that used to be here was `span / 15`:
+		// pure arithmetic over the test's own constants, containing no call to the implementation
+		// at all, so a completely wrong ladder passed it. Walking `want` instead makes the ladder
+		// itself observable. Measured on span 40: want 2 gives 20, want 3 and 4 give 10, want 5
+		// and 8 give 5, want 12 gives 2 — the rungs between 45 and 1, in order.
+		expect(chooseStep(span, 2)).toBe(20);
+		expect(chooseStep(span, 3)).toBe(10);
+		expect(chooseStep(span, 5)).toBe(5);
+		expect(chooseStep(span, 12)).toBe(2);
+		// Monotone: asking for more lines can never return a coarser step.
+		for (let want = 2; want < 12; want++) {
+			expect(chooseStep(span, want + 1)).toBeLessThanOrEqual(chooseStep(span, want));
+		}
 	});
 
 	test("a span finer than an arcsecond divides the span instead of forcing a rung", () => {
@@ -304,8 +317,19 @@ describe("the readout and the trust summary", () => {
 		const t = trust(fit({ notes: ["every point is on the hull"] }));
 		expect(t.notes).toEqual(["every point is on the hull"]);
 		expect(t.summary).toContain("every point is on the hull");
-		const many = trust(fit({ notes: ["a", "b", "c"] }));
-		expect(many.summary).toContain("3 caveats");
+	});
+
+	test("and with several, the LEADING one is shown rather than a bare count", () => {
+		// This used to read "3 caveats" and nothing else, which inverted the intent of the test
+		// above: the moment a second caveat appeared, the summary stopped carrying any of them.
+		// The caveats that fire together are the serious ones — a wrapped antimeridian alongside a
+		// three-point fit — and the kernel orders `notes` most-invalidating first so this line can
+		// show the one that matters and count the rest.
+		const many = trust(fit({ notes: ["the fit is wrong", "b", "c"] }));
+		expect(many.summary).toContain("the fit is wrong");
+		expect(many.summary).toContain("+2 more");
+		// The full list is still available to a caller that wants to render all of them.
+		expect(many.notes).toEqual(["the fit is wrong", "b", "c"]);
 	});
 
 	test("shortfall says how many more points the model wants", () => {

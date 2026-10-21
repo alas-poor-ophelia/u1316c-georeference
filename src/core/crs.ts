@@ -21,7 +21,30 @@ export interface Crs {
 	readonly latRange: readonly [number, number];
 	/** Inclusive bounds of the longitude-like axis. */
 	readonly lngRange: readonly [number, number];
-	/** What the source map's own projection is, where known. `unknown` lets the spline absorb it. */
+	/**
+	 * What the source map's own projection is, where known. `unknown` lets the spline absorb it.
+	 *
+	 * DECLARATIVE ONLY IN v1 — THE FITTERS DO NOT READ IT, and anything that registers a
+	 * non-equirectangular CRS has to deal with that first. Geb's models are linear (or
+	 * polynomial, or spline) in the raw lat/lng pair, so a genuinely Mercator source carries a
+	 * systematic error that grows with the latitude span. Measured over 200 interior points on a
+	 * 4,000 px image, worst error:
+	 *
+	 *       latitude span     affine     polynomial2     tps
+	 *       49-52°             44 px        1.3 px       48 px
+	 *       40-60°            166 px         34 px       77 px
+	 *       20-70°            415 px        154 px       67 px
+	 *
+	 * The spline absorbs the curvature given enough points, which is what `unknown` is for; the
+	 * affine and order-2 models do not. The sharp edge is diagnostic rather than numerical: the
+	 * affine residual display would report that systematic error as if the user had mistyped a
+	 * coordinate, because it cannot tell a projection mismatch from a bad point.
+	 *
+	 * This is UNREACHABLE TODAY and deliberately not guarded: `BUILT_IN` ships only `EARTH`, whose
+	 * projection is `equirectangular`, so a warning would be code that nothing can trigger. The
+	 * note is here rather than in a changelog because whoever adds the second CRS needs it, and
+	 * `diagnose` has no access to a CRS to raise it from.
+	 */
 	readonly projection: "equirectangular" | "mercator" | "unknown";
 }
 

@@ -63,12 +63,29 @@ describe("thin-plate spline", () => {
 		expect(tps.pointCount).toBe(CLEAN.length);
 	});
 
-	test("smoothing stops it interpolating exactly", () => {
-		const m = fitMapping(world(CLEAN), pixels(CLEAN), { kind: "tps", lambda: 10 });
-		const out = new Float64Array(CLEAN.length * 2);
-		m.apply(world(CLEAN), out);
-		const worst = Math.max(...CLEAN.map((p, i) => Math.hypot(out[2 * i]! - p.px, out[2 * i + 1]! - p.py)));
-		expect(worst).toBeGreaterThan(0);
+	test("smoothing stops it interpolating exactly, and more smoothing means more slack", () => {
+		// THIS TEST USED TO ASSERT `worst > 0`, WHICH WAS VACUOUS. At lambda = 0 the worst
+		// control-point residual is already 3.4e-12 px from float noise alone, so a fitter that
+		// ignored its smoothing parameter entirely passed. Measured worst residual on CLEAN:
+		//
+		//     lambda      0        0.1       1        10       100
+		//     px       3.4e-12    0.118    1.087    7.685    21.448
+		//
+		// So the property worth pinning is the SHAPE, and both halves are needed: a magnitude
+		// alone would pass for a fitter that applied some arbitrary constant, and monotonicity
+		// alone would pass for one whose scale was wildly wrong.
+		const worstFor = (lambda: number): number => {
+			const m = fitMapping(world(CLEAN), pixels(CLEAN), { kind: "tps", lambda });
+			const out = new Float64Array(CLEAN.length * 2);
+			m.apply(world(CLEAN), out);
+			return Math.max(...CLEAN.map((p, i) => Math.hypot(out[2 * i]! - p.px, out[2 * i + 1]! - p.py)));
+		};
+		expect(worstFor(0)).toBeLessThan(1e-9);
+		const ladder = [0.1, 1, 10, 100].map(worstFor);
+		for (let i = 1; i < ladder.length; i++) expect(ladder[i]!).toBeGreaterThan(ladder[i - 1]!);
+		// A band, not a floor: 7.685 px measured at lambda = 10.
+		expect(ladder[2]!).toBeGreaterThan(5);
+		expect(ladder[2]!).toBeLessThan(11);
 	});
 });
 
@@ -80,7 +97,12 @@ describe("order-2 polynomial", () => {
 			m.apply(world(CLEAN), out);
 			return Math.max(...CLEAN.map((p, i) => Math.hypot(out[2 * i]! - p.px, out[2 * i + 1]! - p.py)));
 		};
-		expect(measure("polynomial2")).toBeLessThan(measure("affine"));
+		// A BAND ON EACH, not merely "less than". An order-2 model contains the affine one, so it
+		// wins almost regardless of correctness: the old assertion passed for any polynomial that
+		// was not actively broken. Measured: polynomial2 1.99 px against affine 26.78 px.
+		expect(measure("polynomial2")).toBeLessThan(4);
+		expect(measure("affine")).toBeGreaterThan(20);
+		expect(measure("affine") / measure("polynomial2")).toBeGreaterThan(5);
 	});
 
 	test("refuses fewer than six points", () => {
@@ -116,9 +138,20 @@ describe("fit, both directions", () => {
 		const [tx, ty] = truth(52.5, -1.5);
 		const got = toPixel(fit, 52.5, -1.5, IMAGE);
 		expect(got).not.toBeNull();
-		// A spline through eight points does not reproduce the warp exactly away from them; it
-		// should land in the right neighbourhood, which for a 2400x3200 image means tens of pixels.
-		expect(Math.hypot(got!.x - tx, got!.y - ty)).toBeLessThan(60);
+		// MEASURED 3.25 px, AND THE BOUND USED TO BE 60 — eighteen times looser than the real
+		// value, so any regression between 4 and 59 px passed silently. A spline through eight
+		// points does not reproduce the warp exactly away from them, but "the right
+		// neighbourhood" on a 2400x3200 image is single-digit pixels, not tens.
+		expect(Math.hypot(got!.x - tx, got!.y - ty)).toBeLessThan(5);
+
+		// And at four more unpinned probes, because one probe is not a claim about the surface.
+		// Measured: 4.970, 4.457, 0.882 and 1.640 px.
+		for (const [lat, lng] of [[51.0, -2.0], [53.0, -0.5], [54.5, -2.2], [52.0, 0.2]] as const) {
+			const [ex, ey] = truth(lat, lng);
+			const near = toPixel(fit, lat, lng, IMAGE);
+			expect(near).not.toBeNull();
+			expect(Math.hypot(near!.x - ex, near!.y - ey)).toBeLessThan(8);
+		}
 	});
 
 	test("extent carries the image corners into world space", () => {

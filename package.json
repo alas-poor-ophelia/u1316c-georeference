@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint . --max-warnings 0",
     "lint:scanner": "eslint --config eslint.scanner-replica.mjs src scripts test --max-warnings 0",
-    "gate:scanner": "bun run scripts/gate-scanner.ts"
+    "gate:scanner": "bun run scripts/gate-scanner.ts",
+    "gate:mutation": "bun run scripts/gate-mutation.ts",
+    "gate:oracle": "py scripts/oracle/oracle.py"
   },
   "license": "MIT",
   "devDependencies": {

@@ -187,22 +187,69 @@ export function toLatLng(
 /**
  * The extent of a fit: its image corners carried into world space. Coverage is what the map
  * PICTURES, not what its control points happen to span — a user who pinned four places in the
- * south still has a map of the whole island. Returns null if any corner fails to invert.
+ * south still has a map of the whole island.
+ *
+ * GATED, like `toPixel` and `toLatLng`, and it was not: it checked only that each corner came back
+ * finite. A folded order-2 polynomial returns finite garbage, so a corner could confidently name
+ * the wrong place as plain data with no way for a caller to tell.
+ *
+ * READ THIS BEFORE TRUSTING A RESULT. PASSING THE GATE IS NOT AN ACCURACY CLAIM. The round trip
+ * measures whether the forward and reverse fits AGREE WITH EACH OTHER, and image corners are far
+ * outside the control-point hull by construction, so they are extrapolation whatever the gate
+ * says. Measured on the shared eight-point fixture, against a 12 px tolerance, with the true
+ * corner position recovered by inverting the ground truth:
+ *
+ *     model          verdict      round-trip error (px)        TRUE error (px)
+ *     affine         accepted      2.9  3.4  2.9  3.5      31.1  49.7  66.7  10.8
+ *     tps            REFUSED      12.4 17.8 14.3 13.0      70.4  42.7  30.7  14.9
+ *     polynomial2    REFUSED      41.3 18.4 15.9  5.1     258.8  80.4  86.0  58.7
+ *
+ * The affine corners this ACCEPTS are up to 67 px wrong — no better than the spline corners it
+ * refuses. An affine map is self-consistent everywhere, so the gate cannot see its extrapolation
+ * error at all. What the gate genuinely buys is the bottom row: it rejects the folded polynomial
+ * whose corner is 259 px and 1.8° of latitude out. That is worth having, and it is the whole of
+ * what is being claimed.
+ *
+ * IN PRACTICE, THEREFORE, THIS IS LARGELY AFFINE-ONLY. Measured over nine random control points
+ * under a non-linear truth, the proportion returning `null`: a spline 52% when the points cover
+ * 90% of the image, 21% at 60% and 1% at 40%; an order-2 polynomial 96% to 100% throughout. A
+ * caller wanting an extent for a spline over clustered points should expect to handle `null`
+ * routinely rather than exceptionally.
+ *
+ * Nothing consumed this function when the gate was added — the coverage layer deliberately goes
+ * through `toPixel`, which was already gated — so the risk being managed was what the NEXT
+ * consumer would have trusted. Retaining the refusal also keeps one gate across every answer the
+ * kernel gives, which is worth more than a corner-specific tolerance nobody has calibrated: the
+ * 12 px figure comes from "just outside the hull" queries, and corners are a different population.
  */
-export function extent(fit: Fit, size: ImageSize): LatLng[] | null {
+export function extent(
+	fit: Fit,
+	size: ImageSize,
+	tolerancePx: number = roundTripTolerance(size),
+): LatLng[] | null {
 	const b = fit.bounds;
 	const x0 = b?.x ?? 0;
 	const y0 = b?.y ?? 0;
 	const x1 = b === null ? size.width : b.x + b.width;
 	const y1 = b === null ? size.height : b.y + b.height;
 
-	const src = new Float64Array([x0, y0, x1, y0, x1, y1, x0, y1]);
-	const dst = new Float64Array(8);
-	fit.reverse.apply(src, dst);
+	const corners: readonly (readonly [number, number])[] = [
+		[x0, y0],
+		[x1, y0],
+		[x1, y1],
+		[x0, y1],
+	];
+
 	const out: LatLng[] = [];
-	for (let i = 0; i < 4; i++) {
-		const lat = dst[2 * i]!;
-		const lng = dst[2 * i + 1]!;
+	for (const [x, y] of corners) {
+		// Starting from a pixel, so this is the two-evaluation form and the discrepancy is already
+		// measured in pixels.
+		if (!roundTripFromPixel(fit.forward, fit.reverse, x, y, tolerancePx).ok) return null;
+		const src = new Float64Array([x, y]);
+		const dst = new Float64Array(2);
+		fit.reverse.apply(src, dst);
+		const lat = dst[0]!;
+		const lng = dst[1]!;
 		if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
 		out.push({ lat, lng });
 	}

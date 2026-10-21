@@ -49,14 +49,41 @@ export function convexHull(pts: readonly Vec2[]): Vec2[] {
  * Point-in-convex-polygon, inclusive of the boundary. `hull` must be counter-clockwise, as
  * returned by `convexHull`. A degenerate hull of fewer than three vertices contains nothing,
  * which is the right answer: three collinear control points evidence no area at all.
+ *
+ * `epsilon` IS A DISTANCE, in the same units as the coordinates, and getting there needed a fix.
+ * The cross product below is twice the signed area of the triangle (a, b, p), which equals the
+ * edge length times the perpendicular distance from `p` to that edge — so comparing it directly
+ * against a fixed epsilon made the EFFECTIVE tolerance `epsilon / edgeLength`, and therefore
+ * dependent on how large the coordinates happened to be. Measured, with the old absolute test:
+ *
+ *      hull size        distance a point could sit outside and still count as inside
+ *      60°              1.7e-11°   (about 2 µm)
+ *      1°               1e-9°      (0.1 mm)
+ *      0.0001°          1e-5°      (about 1.1 m, or 10% of the hull's own edge)
+ *
+ * That last row is a single-building plan, a case `crs.ts` explicitly contemplates, where a pin a
+ * metre outside the control points was reported as interpolated rather than extrapolated. Dividing
+ * by the edge length makes it distance-against-distance, so one tolerance means the same thing on
+ * a continent and on a floor plan. This is the same defect class `linalg.ts` fixed by scaling its
+ * pivot threshold; it survived here because no test pinned the boundary.
  */
 export function inHull(hull: readonly Vec2[], p: Vec2, epsilon = 1e-9): boolean {
 	if (hull.length < 3) return false;
 	for (let i = 0; i < hull.length; i++) {
 		const a = hull[i]!;
 		const b = hull[(i + 1) % hull.length]!;
-		const side = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
-		if (side < -epsilon) return false;
+		const ex = b.x - a.x;
+		const ey = b.y - a.y;
+		const edge = Math.hypot(ex, ey);
+		// NO GUARD FOR A ZERO-LENGTH EDGE, deliberately. Two identical hull vertices define no
+		// half-plane and so cannot exclude anything, and that falls out for free: the division
+		// gives NaN, and `NaN < -epsilon` is false, so the edge is skipped. An explicit
+		// `if (edge === 0) continue;` stood here and was removed — it was unreachable from
+		// `convexHull` (duplicate points collapse to a two-vertex hull), provably identical in
+		// behaviour, and so could not be pinned by any test or mutant. Its comment also claimed
+		// dividing would "declare everything outside", which is not what NaN does.
+		const distance = (ex * (p.y - a.y) - ey * (p.x - a.x)) / edge;
+		if (distance < -epsilon) return false;
 	}
 	return true;
 }

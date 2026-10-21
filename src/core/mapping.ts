@@ -12,7 +12,7 @@
  * that space, and undoes it on apply. Without this an order-2 fit over a continent-sized map
  * loses most of its significant digits in the normal equations.
  */
-import { FitError, InvalidInputError } from "./errors";
+import { FitError, InvalidInputError, SingularMatrixError } from "./errors";
 import { leastSquares, solve } from "./linalg";
 import { MIN_POINTS, type Mapping, type TransformKind, type TransformOptions } from "./types";
 
@@ -106,7 +106,25 @@ function fitPolynomial(src: Float64Array, dst: Float64Array, kind: "affine" | "p
 		rhs.push([dx, dy]);
 	}
 
-	const coeffs = leastSquares(design, rhs);
+	// A singular system here is a correct refusal, not a bug: an order-2 polynomial genuinely
+	// cannot determine its cross-terms across a direction the control points do not span, and
+	// answering anyway is the "confident finite garbage" this kernel exists to avoid. But the
+	// solver can only speak about matrices, and measured, `polynomial2` refuses a 1 px perpendicular
+	// jitter over a 1000 px line for every seed tried — a configuration a user would describe as
+	// "nine places along the coast", not as degenerate. So the refusal keeps its reason and gains a
+	// route forward, because an error a user cannot act on gets read as the tool being broken.
+	let coeffs: number[][];
+	try {
+		coeffs = leastSquares(design, rhs);
+	} catch (e) {
+		if (e instanceof SingularMatrixError && kind === "polynomial2") {
+			throw new SingularMatrixError(
+				`${e.message} An order-2 polynomial is the most demanding model here: it needs control points spread across two dimensions, not strung along a line. An affine fit over the same points will usually succeed.`,
+			);
+		}
+		throw e;
+	}
+
 	const evaluate = (nx: number, ny: number): [number, number] => {
 		const b = basis(nx, ny);
 		let ex = 0;

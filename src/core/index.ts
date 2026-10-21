@@ -19,6 +19,7 @@ export {
 	type WorldResult,
 } from "./fit";
 export { FitError, InvalidInputError, SingularMatrixError } from "./errors";
+export { NEARLY_COLLINEAR_RATIO, principalAxisRatio, wrapsAntimeridian } from "./geometry";
 export { convexHull, inHull, type Vec2 } from "./hull";
 export { fitMapping, TpsMapping } from "./mapping";
 export {

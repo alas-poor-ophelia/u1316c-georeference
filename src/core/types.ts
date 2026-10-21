@@ -41,9 +41,18 @@ export const MIN_POINTS: Readonly<Record<TransformKind, number>> = {
  * The number of points below which a model is fittable but not yet meaningful. The UI offers the
  * model and says so, rather than pretending a 3-point spline is doing spline work: with exactly
  * three points a thin-plate spline has only its affine part and IS an affine transform.
+ *
+ * AFFINE IS 4, NOT 3, and the difference is the whole point of this constant. Three points is the
+ * MINIMUM — `MIN_POINTS` says so — but an affine fit has three free parameters per axis, so at
+ * exactly three points it reproduces them exactly and its residuals are zero WHATEVER the
+ * coordinates say. Measured: one control point's longitude sign-flipped, about 150 km of error,
+ * gives an RMS at the float-noise floor at three points (0.0 to about 1e-13 px, depending on the
+ * points) against 146 to 199 px at four. Saying "recommended" of a point
+ * count at which the trust display cannot see a mistake was the defect; four is the first count
+ * where the residual carries information. See the matching note in `residuals.ts`.
  */
 export const RECOMMENDED_POINTS: Readonly<Record<TransformKind, number>> = {
-	affine: 3,
+	affine: 4,
 	polynomial2: 8,
 	tps: 8,
 };

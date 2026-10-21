@@ -58,7 +58,13 @@ export function trust(fit: FitInfo): Trust {
 
 	const parts = [`${fit.model}, ${fit.pointCount} points`, `RMS ${d.affineRms.toFixed(1)} px`];
 	if (named !== null && d.affine.length > 1) parts.push(`worst ${named.label} ${named.error.toFixed(1)} px`);
-	if (d.notes.length > 0) parts.push(d.notes.length === 1 ? d.notes[0]! : `${d.notes.length} caveats`);
+	// ALWAYS SHOW THE LEADING CAVEAT, not a bare count. This used to collapse to "2 caveats" the
+	// moment a second one appeared, which is the worst possible behaviour: the caveats that fire
+	// together are the serious ones — a wrapped antimeridian plus a three-point fit — and the user
+	// got a number instead of either. The kernel orders `notes` most-invalidating first precisely
+	// so this line can take the first and say how many more there are.
+	if (d.notes.length === 1) parts.push(d.notes[0]!);
+	else if (d.notes.length > 1) parts.push(`${d.notes[0]!} (+${d.notes.length - 1} more)`);
 
 	return { rms: d.affineRms, worst: named, notes: d.notes, summary: parts.join(" · ") };
 }

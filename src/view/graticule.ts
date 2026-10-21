@@ -48,8 +48,20 @@ export function chooseStep(span: number, want = 4): number {
  */
 export function ticks(lo: number, hi: number, step: number): number[] {
 	if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(step > 0) || hi < lo) return [];
-	const first = Math.ceil(lo / step);
-	const last = Math.floor(hi / step);
+	// NUDGED BEFORE ROUNDING, or the "inclusive" in this function's name is not true. With a step
+	// of 1/60, `25 * step / step` evaluates to 24.999999999999996, so a plain `floor` drops the
+	// tick sitting exactly on the boundary — measured, 640 of 4,800 windows lost one. The nudge is
+	// relative so it means the same thing at any step, and it is far smaller than the gap between
+	// adjacent ladder steps, so it can never admit a tick that does not belong.
+	const slack = 1e-9;
+	let first = Math.ceil(lo / step - slack);
+	const last = Math.floor(hi / step + slack);
+	// `Math.ceil` returns NEGATIVE ZERO for a small negative argument, which the nudge above
+	// manufactures whenever `lo` is 0 — and `-0 * step` is `-0`, a different value from `0` under
+	// `Object.is`. Left alone it puts a negative zero at the origin tick, which is both a failing
+	// equality and, downstream, a "-0°" on a map label. This project has been bitten by negative
+	// zero twice before; `format.ts` carries the other guard.
+	if (Object.is(first, -0)) first = 0;
 	// A span far wider than the step would produce an unbounded list on a degenerate input.
 	if (last - first > 10_000) return [];
 	const out: number[] = [];

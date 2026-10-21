@@ -15,3 +15,8 @@ src/__gate/
 # Throwaway measurement scripts. Guarded so an interrupted session cannot strand one in the
 # tracked tree, which the store scan reads.
 scripts/_scratch-*.ts
+
+# Numerical-oracle scratch. The HARNESS is tracked (scripts/oracle/*.ts, *.py) because it is a
+# gate; its generated case and output JSON are not, being large, regenerable and machine-specific.
+scripts/oracle/*.json
+scripts/oracle/__pycache__/
