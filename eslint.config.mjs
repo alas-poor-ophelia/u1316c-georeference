@@ -101,6 +101,24 @@ export default tseslint.config(
 								"../api/host",
 								"../plugin/*",
 								"../plugin/**",
+								// ONE LEVEL DEEPER TOO. The `files` glob above admits src/view/anything/x.ts,
+								// but the patterns above are written for src/view/x.ts depth — a file one
+								// directory down reaches the kernel as `../../core`, which matched nothing,
+								// so the fence had a door in it exactly where a growing view would walk.
+								// Found by the stage-B recon; closed before the first subdirectory existed.
+								"../../core",
+								"../../core/*",
+								"../../core/**",
+								"../../persist",
+								"../../persist/*",
+								"../../persist/**",
+								"../../query",
+								"../../query/*",
+								"../../query/**",
+								"../../api/controller",
+								"../../api/host",
+								"../../plugin/*",
+								"../../plugin/**",
 							],
 							message:
 								"The view consumes Geb ONLY through the public API (src/api/types, src/api/errors) — that is the phase-5 dogfooding gate. If something is missing, add it to the API.",

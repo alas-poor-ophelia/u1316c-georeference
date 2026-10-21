@@ -4,6 +4,7 @@ import type { GebAPI } from "../api/types";
 import { reconcile, type ReconcileOutcome } from "../persist/reconcile";
 import { handleRename } from "../persist/rename";
 import type { VaultPort } from "../persist/types";
+import { GeorefView, VIEW_TYPE } from "../view/view";
 import { ObsidianVault } from "./vault-adapter";
 
 /**
@@ -41,6 +42,24 @@ export default class GebPlugin extends Plugin {
 		this.alive = true;
 		this.controller = new ApiController(this.vault, this.manifest.version);
 		this.api = this.controller.api;
+
+		// THE VIEW IS A CONSUMER OF THE API, handed a getter rather than the object: it must see
+		// `null` after unload and the new object after a reload, exactly as a third-party plugin
+		// would by re-reading `app.plugins.plugins.geb.api`. Passing the object would let the
+		// view keep a dead API alive past `geb:unload`.
+		this.registerView(VIEW_TYPE, (leaf) => new GeorefView(leaf, () => this.api));
+		this.addCommand({
+			id: "open-georef-view",
+			name: "Open georeference view",
+			// Available only when the active note IS a loaded georeference, so the palette does
+			// not offer a map for a note that has none.
+			checkCallback: (checking) => {
+				const id = this.georefIdOfActiveFile();
+				if (id === null) return false;
+				if (!checking) void this.openView(id);
+				return true;
+			},
+		});
 
 		// Geb owns rename handling outright: the metadata cache's `changed` event explicitly does
 		// not fire on rename, so this is the only notification there is.
@@ -92,6 +111,37 @@ export default class GebPlugin extends Plugin {
 		this.controller = null;
 		this.api = null;
 		this.vault = null;
+	}
+
+	/** The id of the georeference the active note holds, through the public API, or null. */
+	private georefIdOfActiveFile(): string | null {
+		const api = this.api;
+		const file = this.app.workspace.getActiveFile();
+		if (api === null || !api.ready || file === null) return null;
+		return api.listGeorefs().find((g) => g.notePath === file.path)?.id ?? null;
+	}
+
+	/**
+	 * Reveal the leaf already showing this map, or open a new one. One leaf per map, never two.
+	 *
+	 * Matched on the leaf's SERIALISED STATE, not on `instanceof`. A background tab restored at
+	 * startup is a `DeferredView` until it is first shown (Obsidian 1.7.2+), and after a plugin
+	 * reload any surviving leaf holds the previous module's class — `instanceof` is false in both
+	 * cases, and a view that cannot recognise its own leaf opens a duplicate. The state is what the
+	 * workspace layout stored, and it is the same whichever class is behind the leaf.
+	 */
+	private async openView(georefId: string): Promise<void> {
+		const existing = this.app.workspace
+			.getLeavesOfType(VIEW_TYPE)
+			.find((l) => l.getViewState().state?.georefId === georefId);
+		const leaf = existing ?? this.app.workspace.getLeaf(true);
+		if (existing === undefined) {
+			const state: Record<string, unknown> = { georefId };
+			await leaf.setViewState({ type: VIEW_TYPE, state, active: true });
+		}
+		await this.app.workspace.revealLeaf(leaf);
+		// `revealLeaf` shows the leaf; it does not necessarily make it the active one.
+		this.app.workspace.setActiveLeaf(leaf, { focus: true });
 	}
 
 	/**

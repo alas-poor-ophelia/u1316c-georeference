@@ -1,0 +1,174 @@
+/*
+ * Geb georeference view.
+ *
+ * Obsidian loads this file from the plugin folder by name; there is no build step for it. The
+ * community-store scan parses it and rejects the relational pseudo-class and the priority flag,
+ * so neither appears here — not even in a comment, in case the scan reads raw text — and every
+ * colour comes from Obsidian's own variables so the view follows the user's theme.
+ *
+ * Layout: a viewport element clips a stage; the stage holds the image and an SVG overlay stacked
+ * at the same origin, and the shell positions both with one CSS transform. The image is scaled by
+ * the browser for DISPLAY only — Geb never resamples a map, the source stays exactly as drawn.
+ */
+
+.geb-view {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-height: 0;
+}
+
+.geb-toolbar {
+	display: flex;
+	gap: var(--size-4-2);
+	align-items: center;
+	padding: var(--size-4-1) var(--size-4-2);
+	border-bottom: 1px solid var(--background-modifier-border);
+	flex: 0 0 auto;
+}
+
+.geb-toolbar button {
+	cursor: pointer;
+}
+
+.geb-status {
+	margin-left: auto;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+}
+
+.geb-viewport {
+	position: relative;
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: hidden;
+	background: var(--background-secondary);
+	cursor: grab;
+	/* The browser must not pan or pinch the page for us: the shell owns every gesture. */
+	touch-action: none;
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.geb-viewport.geb-dragging {
+	cursor: grabbing;
+}
+
+.geb-stage {
+	position: absolute;
+	left: 0;
+	top: 0;
+	transform-origin: 0 0;
+	/* Width and height are set to the image's natural size by the shell. A pan changes only
+	   this element's transform, and the hint lets the compositor move it without a repaint. */
+	will-change: transform;
+}
+
+.geb-image {
+	display: block;
+	position: absolute;
+	left: 0;
+	top: 0;
+	/* Natural size; the stage transform does the scaling. */
+	max-width: none;
+	image-rendering: auto;
+	pointer-events: none;
+}
+
+.geb-overlay {
+	position: absolute;
+	left: 0;
+	top: 0;
+	overflow: visible;
+	pointer-events: none;
+}
+
+/* The graticule is drawn in IMAGE pixels and scaled with the stage, so its stroke must be
+   scaled back or a zoomed-in map gets a stroke as thick as a road. The adapter sets each
+   stroke-width to 1/scale in image units; `vector-effect` is not relied on, because its handling
+   of a CSS transform on an HTML ancestor is not trusted across engines. */
+.geb-graticule {
+	fill: none;
+	stroke: var(--text-accent);
+	stroke-opacity: 0.45;
+}
+
+.geb-graticule-label {
+	fill: var(--text-accent);
+	font-size: 11px;
+	paint-order: stroke;
+	stroke: var(--background-primary);
+	stroke-width: 3px;
+	stroke-linejoin: round;
+}
+
+.geb-pin {
+	fill: var(--interactive-accent);
+	stroke: var(--background-primary);
+	stroke-width: 1.5px;
+	vector-effect: non-scaling-stroke;
+}
+
+/* Outside the control-point hull: resolved, but extrapolated and so fuzzy. Labelled, not hidden. */
+.geb-pin.geb-extrapolated {
+	fill: var(--text-warning);
+	fill-opacity: 0.8;
+	stroke-dasharray: 2 2;
+}
+
+.geb-pin-uncertainty {
+	fill: var(--interactive-accent);
+	fill-opacity: 0.12;
+	stroke: var(--interactive-accent);
+	stroke-opacity: 0.4;
+	/* stroke-width is set by the adapter in image units, as for the graticule. */
+}
+
+.geb-pin-label {
+	fill: var(--text-normal);
+	font-size: 12px;
+	paint-order: stroke;
+	stroke: var(--background-primary);
+	stroke-width: 3px;
+	stroke-linejoin: round;
+}
+
+/* Pins and labels keep a constant SCREEN size: they are positioned in image pixels but must not
+   grow into blobs at high zoom, so the shell counter-scales each pin group. */
+
+.geb-readout {
+	position: absolute;
+	left: var(--size-4-2);
+	bottom: var(--size-4-2);
+	padding: var(--size-2-1) var(--size-4-2);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-normal);
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	pointer-events: none;
+}
+
+.geb-readout:empty {
+	display: none;
+}
+
+/* Covers the viewport rather than replacing it, so the viewport keeps a measurable size while a
+   message shows — the shell's first fit depends on that. */
+.geb-message {
+	position: absolute;
+	inset: 0;
+	padding: var(--size-4-4);
+	color: var(--text-muted);
+	background: var(--background-secondary);
+}
+
+.geb-toolbar button:disabled {
+	cursor: default;
+	opacity: 0.5;
+}

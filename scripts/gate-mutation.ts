@@ -253,6 +253,116 @@ const MUTANTS: readonly Mutant[] = [
 		replace: "\tif (false) first = 0;",
 	},
 
+	// --- view/shell.ts: the view's decisions ----------------------------------------------
+	{
+		label: "shell reloads on every map's change, not only its own",
+		file: "src/view/shell.ts",
+		find: "\t\t\t\tif (this.notePath === null || p.paths.length === 0 || p.paths.includes(this.notePath)) this.load();",
+		replace: "\t\t\t\tthis.load();",
+	},
+	{
+		label: "a map with no note path yet ignores the change that brings it",
+		file: "src/view/shell.ts",
+		find: "\t\t\t\tif (this.notePath === null || p.paths.length === 0 || p.paths.includes(this.notePath)) this.load();",
+		replace: "\t\t\t\tif (p.paths.length === 0 || (this.notePath !== null && p.paths.includes(this.notePath))) this.load();",
+	},
+	{
+		label: "the message state keeps the stale map, so the toolbar can resurrect it",
+		file: "src/view/shell.ts",
+		find: "\t\tthis.image = null;\n\t\tthis.fit = null;",
+		replace: "\t\tthis.fit = null;",
+	},
+	{
+		label: "a fit is computed against an empty surface instead of deferred",
+		file: "src/view/shell.ts",
+		find: "\t\tif (!(size.width > 0 && size.height > 0)) {",
+		replace: "\t\tif (false) {",
+	},
+	{
+		label: "graticule points outside the image are kept",
+		file: "src/view/shell.ts",
+		find: "\t\t\tif (p === null || !insideImage(image, p)) {",
+		replace: "\t\t\tif (p === null) {",
+	},
+	{
+		label: "uncertainty ring sized from the north probe alone",
+		file: "src/view/shell.ts",
+		find: "\t\treturn Math.max(rN, rE);",
+		replace: "\t\treturn rN;",
+	},
+	{
+		label: "a drag ignores where the pointer is, so the readout freezes",
+		file: "src/view/shell.ts",
+		find: "\t\tif (at !== undefined) this.hover = at;",
+		replace: "\t\tvoid at;",
+	},
+	{
+		label: "shell drops the pins",
+		file: "src/view/shell.ts",
+		find: "\t\t\tthis.pins = this.api.featuresIn(this.georefId) ?? [];",
+		replace: "\t\t\tthis.pins = [];",
+	},
+	{
+		label: "readout no longer says when a coordinate is extrapolated",
+		file: "src/view/shell.ts",
+		find: "\t\treturn coordinate(w) + (w.extrapolated ? \" · extrapolated\" : \"\");",
+		replace: "\t\treturn coordinate(w);",
+	},
+	{
+		label: "readout answers for pointer positions off the image",
+		file: "src/view/shell.ts",
+		find: "\t\tif (img === null || !insideImage(this.image, img)) return \"\";",
+		replace: "\t\tif (img === null) return \"\";",
+	},
+	{
+		label: "tap hit radius not scaled into image pixels",
+		file: "src/view/shell.ts",
+		find: "\t\tconst hit = pinAt(this.pins, img, hitRadiusCss / this.viewport.scale);",
+		replace: "\t\tconst hit = pinAt(this.pins, img, hitRadiusCss);",
+	},
+	{
+		label: "every reload re-fits the image, discarding the user's viewport",
+		file: "src/view/shell.ts",
+		find: "\t\t\tconst firstPlacement = this.image === null;",
+		replace: "\t\t\tconst firstPlacement = true;",
+	},
+	{
+		label: "first load never fits the image to the container",
+		file: "src/view/shell.ts",
+		find: "\t\t\tif (firstPlacement) this.fitImage();\n\t\t\telse this.paint();",
+		replace: "\t\t\tthis.paint();",
+	},
+	{
+		label: "a drag does not mark the viewport as user-adjusted (resize snaps it back)",
+		file: "src/view/shell.ts",
+		find: "\t\tthis.viewport = panBy(this.viewport, dx, dy);\n\t\tthis.userAdjusted = true;",
+		replace: "\t\tthis.viewport = panBy(this.viewport, dx, dy);",
+	},
+	{
+		label: "wheel zoom unbounded per event",
+		file: "src/view/shell.ts",
+		find: "\t\tconst factor = Math.min(WHEEL_STEP_LIMIT, Math.max(1 / WHEEL_STEP_LIMIT, raw));",
+		replace: "\t\tconst factor = raw;",
+	},
+	{
+		label: "unload leaves the dead map on screen with no message",
+		file: "src/view/shell.ts",
+		find: "\t\t\t\tthis.showMessage(MESSAGES.unloaded);",
+		replace: "\t\t\t\tvoid MESSAGES.unloaded;",
+	},
+	{
+		label: "pins copied on every paint (the adapter rebuilds the overlay per hover)",
+		file: "src/view/shell.ts",
+		find: "			pins: this.framePins,",
+		replace: "			pins: [...this.framePins],",
+	},
+	{
+		label: "pin labels keep the .md extension",
+		file: "src/view/shell.ts",
+		find: "\treturn file.endsWith(\".md\") ? file.slice(0, -3) : file;",
+		replace: "\treturn file;",
+	},
+
 	// --- validity.ts: the round-trip gate -------------------------------------------------
 	{
 		label: "round-trip tolerance so wide the gate never refuses anything",
