@@ -17,6 +17,7 @@ import type { Diagnostics } from "../core/residuals";
 import type { ControlPoint, LatLng, TransformKind, TransformOptions } from "../core/types";
 import type { Staleness } from "../persist/types";
 import type { CoordinateSource, ProblemCode, RejectionCode } from "../query/types";
+import type { TimeAdapter, TimeAdapterInfo } from "../time/adapters";
 import type { GebErrorCode } from "./errors";
 
 export const API_VERSION = 1 as const;
@@ -35,7 +36,18 @@ export type { Diagnostics, PointResidual } from "../core/residuals";
 export type { ControlPoint, LatLng, Pixel, TransformKind, TransformOptions } from "../core/types";
 export type { Staleness } from "../persist/types";
 export type { CoordinateSource, ProblemCode, RejectionCode } from "../query/types";
+export type { TimeAdapter, TimeAdapterInfo } from "../time/adapters";
 export type { GebErrorCode, CodedError } from "./errors";
+
+/** Options for `featuresIn`. *(API 1)* */
+export interface FeaturesInOptions {
+	/**
+	 * A day on the shared time line (day 0 = 1970-01-01, whole days). Only features whose dated
+	 * span covers it are returned; a feature with no dates is always present, and one whose date
+	 * cannot be read is present too and reported by `listProblems`. See API.md, "Time".
+	 */
+	readonly at?: number;
+}
 
 /** A coordinate reference system, as handed out. *(API 1)* */
 export interface CrsInfo {
@@ -255,10 +267,22 @@ export interface GebAPI {
 	georefsCovering(lat: number, lng: number, crs?: string): readonly CoverageInfo[];
 	listFeatures(): readonly FeatureInfo[];
 	/** `null` means no such LOADED map — distinct from a map with no pins. *(API 1)* */
-	featuresIn(georefId: string): readonly PinInfo[] | null;
+	featuresIn(georefId: string, opts?: FeaturesInOptions): readonly PinInfo[] | null;
 
 	listProblems(): readonly ProblemInfo[];
 	listRejected(): readonly RejectedInfo[];
+
+	/**
+	 * The one registry in API 1. Returns an unregister function that runs at most once and only
+	 * removes the adapter it registered. Cleared on unload: re-register on `geb:ready`. Throws
+	 * `geb-duplicate-id` for an id already taken, including the built-in `"gregorian"`. *(API 1)*
+	 */
+	registerTimeAdapter(adapter: TimeAdapter): () => void;
+	listTimeAdapters(): readonly TimeAdapterInfo[];
+	/** Text to a day on the shared line under a calendar (default: the built-in year adapter), or null. Throws `geb-unknown-calendar`. *(API 1)* */
+	toDay(text: string, calendar?: string): number | null;
+	/** A day on the shared line to text under a calendar. *(API 1)* */
+	fromDay(day: number, calendar?: string): string;
 
 	/** Every write returns the record as PARSED BACK from what was written. *(API 1)* */
 	createGeoref(input: CreateGeorefInput): Promise<GeorefSummary>;

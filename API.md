@@ -54,6 +54,8 @@ Errors are `Error` objects with a `code` property, so you can branch without mat
 | `geb-note-exists` | The note path is already taken. A create never overwrites. |
 | `geb-lossy-record` | The record loaded with data *dropped*, so writing it back would delete what you need to fix it. |
 | `geb-bad-argument` | The arguments are the wrong shape. |
+| `geb-unknown-calendar` | No time adapter is registered under that calendar id. |
+| `geb-bad-adapter` | The object handed to `registerTimeAdapter` is not an adapter. |
 <!-- /geb:error-codes -->
 
 ## Lifecycle and identity
@@ -78,7 +80,11 @@ Errors are `Error` objects with a `code` property, so you can branch without mat
 | `toLatLng` | method | Pixel to world, or `null`. *(API 1)* |
 | `georefsCovering` | method | Every map that covers a coordinate. *(API 1)* |
 | `listFeatures` | method | Every place note carrying coordinates. *(API 1)* |
-| `featuresIn` | method | Every place note landing on one map. `null` means no such **loaded** map. *(API 1)* |
+| `featuresIn` | method | Every place note landing on one map, optionally only those present `at` a day on the shared time line. `null` means no such **loaded** map. *(API 1)* |
+| `registerTimeAdapter` | method | The one registry. Returns an unregister function. See **Time**. *(API 1)* |
+| `listTimeAdapters` | method | Every registered adapter, built-in first. *(API 1)* |
+| `toDay` | method | Date text to a day on the shared line under a calendar, or `null`. *(API 1)* |
+| `fromDay` | method | A day on the shared line to text under a calendar. *(API 1)* |
 | `listProblems` | method | Everything Geb noticed and did not act on. *(API 1)* |
 | `listRejected` | method | Every georeference that could not be used, and why. *(API 1)* |
 | `createGeoref` | method | Creates the note. Returns the record **as parsed back from what was written**. *(API 1)* |
@@ -180,12 +186,48 @@ api.listGeorefs();
 ```
 <!-- /geb:example -->
 
+## Time
+
+**One shared line, whole days, day 0 = 1970-01-01 in the proleptic Gregorian calendar** — the
+same scalar Seshat uses, bounded to ±10,000,000 days. Every adapter maps onto this line and none
+defines its own, which is what makes a date under one calendar comparable with a date under
+another: `toDay("1", "myplugin:auc")` and `toDay("-752")` are the same number.
+
+**Date fields stay raw text.** A place note carries `geb-from`, `geb-to` and an optional
+`geb-calendar`; the index stores exactly what was written, and an adapter reads it when a query
+asks. The built-in adapter, id `gregorian`, reads a plain signed **year** (astronomical: year 0
+is 1 BC, -1 is 2 BC) — so a plain integer stays filterable in Dataview. Years from -25410 to
+29349 fit on the line; beyond that a year is refused, not clamped.
+
+**A `from` is the first day its text names and a `to` is the last.** `from: 71, to: 866` runs
+from 71-01-01 through 866-12-31, which is what someone who writes years means. An adapter gives
+the first day from `parse` and may give the last from an optional `last`; without `last`, a `to`
+ends on the day `parse` gives, which is right for text naming a single day.
+
+**Missing bounds are explicit.** No `geb-from` is negative infinity, no `geb-to` is positive
+infinity, and a feature with neither is always present. `featuresIn(id, { at })` keeps a feature
+when `from <= at && at <= to`, inclusive at both ends. `at` is a day on the line; turn text into
+one with `toDay` first.
+
+**A bound that cannot be read does not hide the feature.** An unknown calendar, text the adapter
+refuses, an adapter that throws, or an adapter that answers with something that is not a whole
+day on the line: each makes that side unbounded and adds a `bad-date` problem to `listProblems`
+naming the note — a pin vanishing because of a typo, with nothing saying so, is the silence this
+plugin forbids. The one span that reads cleanly and still hides its pin is `from` after `to`:
+both bounds were understood and together they say "never"; that is honoured, and reported. Date
+problems are found at query time, since adapters come and go.
+
+**Registering an adapter** returns an unregister function that runs at most once and removes only
+what it registered. Ids are namespaced strings with no whitespace; `gregorian` is taken. The
+registry keeps its own record of what you registered — changing your object's `id` afterwards
+changes nothing. It is cleared on unload, so re-register on `geb:ready`. Registering fires no
+event: re-query after you register. `toDay` and `fromDay` throw `geb-bad-adapter` when the
+adapter you named is broken; queries never do.
+
 ## Not in API 1
 
 - `toPixelBatch` / `toLatLngBatch` — deferred deliberately, not forgotten. A `Float64Array` has
   nowhere to put "the transform is meaningless here" or "this point is extrapolated", so the
   validity and hull gating has to be designed into the return shape before the function exists.
   Adding it thinly would let a batch consumer bypass both.
-- `registerTimeAdapter`, and the `at` filter on `featuresIn` — date fields (`geb-from`, `geb-to`,
-  `geb-calendar`) are read and handed to you as **raw text**. Deciding what "450" means belongs to
-  a time adapter, which arrives with its own phase.
+- Time-slider chrome — the filter exists; the control over it does not.

@@ -37,9 +37,13 @@ import { toFrontmatter } from "../persist/serialize";
 import { KEY, type Georeference, type ParseResult, type Staleness, type StoredFit, type VaultPort } from "../persist/types";
 import { createAndCapture, writeAndCapture } from "../persist/write";
 import { featuresIn, georefsCovering } from "../query/coverage";
-import type { LoadedGeoref, WorldIndex } from "../query/types";
+import type { LoadedGeoref, Problem, WorldIndex } from "../query/types";
+import { tryParse, type TimeAdapter } from "../time/adapters";
+import { presentAt, span } from "../time/filter";
+import { DAY_LIMIT, isDay } from "../time/line";
 import { IndexHost, type ChangeSet } from "./host";
 import { codedError } from "./errors";
+import { TimeAdapterRegistry } from "./time";
 import {
 	API_VERSION,
 	type CreateGeorefInput,
@@ -122,6 +126,8 @@ export class ApiController {
 	 * claiming `"same"` for an image nobody looked at is an answer nobody earned.
 	 */
 	private readonly staleness = new Map<string, Staleness>();
+	/** Time adapters, keyed on id. Cleared on unload; consumers re-register on ready. */
+	private readonly time = new TimeAdapterRegistry();
 	private readonly built: BuiltApi;
 	readonly api: GebAPI;
 
@@ -156,6 +162,30 @@ export class ApiController {
 		// the plugin discards this controller. Kept because a retained reference should not keep a
 		// map of verdicts alive, and labelled because no test can prove it.
 		this.staleness.clear();
+		// The registry is the plugin instance's: a consumer re-registers on the next `ready`.
+		this.time.clear();
+	}
+
+	/** The adapter for a calendar id, or a coded throw: a consumer naming a calendar must learn it is unknown. */
+	private adapter(calendar: string | undefined): TimeAdapter {
+		const a = this.time.resolve(calendar);
+		if (a === null) throw codedError("geb-unknown-calendar", `No time adapter is registered for calendar "${calendar ?? ""}".`);
+		return a;
+	}
+
+	/**
+	 * Date problems are found at QUERY time, not at index time: the index stores raw text and
+	 * adapters come and go, so a bound that is unreadable today may read fine once its calendar
+	 * is registered. A feature with such a bound is still returned by every query — unbounded on
+	 * that side — and this is where it says so.
+	 */
+	private dateProblems(index: WorldIndex): Problem[] {
+		const out: Problem[] = [];
+		for (const f of index.features) {
+			const s = span(f, (c) => this.time.resolve(c));
+			if (s.problem !== null) out.push({ notePath: f.notePath, code: "bad-date", message: s.problem });
+		}
+		return out;
 	}
 
 	private assertLive(): void {
@@ -412,13 +442,45 @@ export class ApiController {
 
 			georefsCovering: (lat, lng, crs) => handout(georefsCovering(this.snapshot(), lat, lng, crs ?? EARTH.id)),
 			listFeatures: () => handout(this.snapshot().features),
-			featuresIn: (id) => {
+			featuresIn: (id, opts) => {
 				const pins = featuresIn(this.snapshot(), id);
-				return pins === null ? null : handout(pins);
+				if (pins === null) return null;
+				const at = opts?.at;
+				if (at === undefined) return handout(pins);
+				if (!isDay(at)) throw codedError("geb-bad-argument", `at must be a whole day on the shared line within ±${DAY_LIMIT}; got ${String(at)}.`);
+				return handout(pins.filter((p) => presentAt(p.feature, at, (c) => this.time.resolve(c))));
 			},
 
-			listProblems: () => handout(this.snapshot().problems),
+			listProblems: () => {
+				const index = this.snapshot();
+				return handout([...index.problems, ...this.dateProblems(index)]);
+			},
 			listRejected: () => handout(this.snapshot().rejected),
+
+			registerTimeAdapter: (adapter) => (live(), this.time.register(adapter)),
+			listTimeAdapters: () => (live(), handout(this.time.list())),
+			toDay: (text, calendar) => {
+				live();
+				if (typeof text !== "string") throw codedError("geb-bad-argument", "toDay takes the date as text.");
+				// A consumer calling an adapter by name is told when that adapter is broken; a query
+				// filtering through the same adapter is not, and reports a problem instead.
+				const got = tryParse(this.adapter(calendar), text, false);
+				if (got.fault !== null) throw codedError("geb-bad-adapter", got.fault);
+				return got.day;
+			},
+			fromDay: (day, calendar) => {
+				live();
+				const a = this.adapter(calendar);
+				if (!isDay(day)) throw codedError("geb-bad-argument", `fromDay takes a whole day on the shared line within ±${DAY_LIMIT}; got ${String(day)}.`);
+				let text: unknown;
+				try {
+					text = a.format(day);
+				} catch (e) {
+					throw codedError("geb-bad-adapter", `adapter "${a.id}" threw: ${e instanceof Error ? e.message : String(e)}`);
+				}
+				if (typeof text !== "string") throw codedError("geb-bad-adapter", `adapter "${a.id}" formatted a day as ${typeof text}, not text`);
+				return text;
+			},
 
 			createGeoref: (input) => this.createGeoref(input),
 			updateGeoref: (id, patch) => this.updateGeoref(id, patch),

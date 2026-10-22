@@ -66,6 +66,9 @@ export type Conformance = [
 	Expect<Equal<D.UpdateGeorefPatch, A.UpdateGeorefPatch>>,
 	Expect<Equal<D.GebEvent, A.GebEvent>>,
 	Expect<Equal<D.GebEventPayload, A.GebEventPayload>>,
+	Expect<Equal<D.TimeAdapter, A.TimeAdapter>>,
+	Expect<Equal<D.TimeAdapterInfo, A.TimeAdapterInfo>>,
+	Expect<Equal<D.FeaturesInOptions, A.FeaturesInOptions>>,
 
 	// And the surface itself, which subsumes every signature above.
 	Expect<Equal<D.GebAPI, A.GebAPI>>,
@@ -99,6 +102,10 @@ export const API_KEYS = [
 	"featuresIn",
 	"listProblems",
 	"listRejected",
+	"registerTimeAdapter",
+	"listTimeAdapters",
+	"toDay",
+	"fromDay",
 	"createGeoref",
 	"updateGeoref",
 	"deleteGeoref",

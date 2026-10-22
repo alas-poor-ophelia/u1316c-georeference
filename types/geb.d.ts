@@ -79,6 +79,7 @@ export type ProblemCode =
 	| "bad-uncertainty"
 	| "bad-certainty"
 	| "bad-text"
+	| "bad-date"
 	| "duplicate-id"
 	| "lossy-record"
 	| "extra-fits"
@@ -100,7 +101,31 @@ export type GebErrorCode =
 	| "geb-duplicate-id"
 	| "geb-note-exists"
 	| "geb-lossy-record"
-	| "geb-bad-argument";
+	| "geb-bad-argument"
+	| "geb-unknown-calendar"
+	| "geb-bad-adapter";
+
+/** How date text becomes a day on the shared line (day 0 = 1970-01-01, whole days), and back. *(API 1)* */
+export interface TimeAdapter {
+	readonly id: string;
+	readonly name: string;
+	/** The FIRST day the text names, or null. */
+	parse(text: string): number | null;
+	/** The LAST day the text names, for text naming a span (a year). Optional; used for `geb-to`. */
+	last?(text: string): number | null;
+	format(day: number): string;
+}
+
+/** *(API 1)* */
+export interface TimeAdapterInfo {
+	readonly id: string;
+	readonly name: string;
+}
+
+/** *(API 1)* */
+export interface FeaturesInOptions {
+	readonly at?: number;
+}
 
 /** *(API 1)* */
 export interface CrsInfo {
@@ -269,10 +294,15 @@ export interface GebAPI {
 
 	georefsCovering(lat: number, lng: number, crs?: string): readonly CoverageInfo[];
 	listFeatures(): readonly FeatureInfo[];
-	featuresIn(georefId: string): readonly PinInfo[] | null;
+	featuresIn(georefId: string, opts?: FeaturesInOptions): readonly PinInfo[] | null;
 
 	listProblems(): readonly ProblemInfo[];
 	listRejected(): readonly RejectedInfo[];
+
+	registerTimeAdapter(adapter: TimeAdapter): () => void;
+	listTimeAdapters(): readonly TimeAdapterInfo[];
+	toDay(text: string, calendar?: string): number | null;
+	fromDay(day: number, calendar?: string): string;
 
 	createGeoref(input: CreateGeorefInput): Promise<GeorefSummary>;
 	updateGeoref(georefId: string, patch: UpdateGeorefPatch): Promise<GeorefSummary>;

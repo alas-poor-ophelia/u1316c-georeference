@@ -57,7 +57,7 @@ export default tseslint.config(
 		// queries and the whole public API are driven by a fake without launching anything.
 		// src/api is in here deliberately: an API that reached for `app` directly could not be
 		// behaviourally tested, and the phase-4 gate requires exactly that.
-		files: ["src/persist/**/*.ts", "src/query/**/*.ts", "src/api/**/*.ts"],
+		files: ["src/persist/**/*.ts", "src/query/**/*.ts", "src/api/**/*.ts", "src/time/**/*.ts"],
 		rules: {
 			"no-restricted-imports": [
 				"error",
@@ -97,6 +97,9 @@ export default tseslint.config(
 								"../query",
 								"../query/*",
 								"../query/**",
+								"../time",
+								"../time/*",
+								"../time/**",
 								"../api/controller",
 								"../api/host",
 								"../plugin/*",
@@ -115,6 +118,9 @@ export default tseslint.config(
 								"../../query",
 								"../../query/*",
 								"../../query/**",
+								"../../time",
+								"../../time/*",
+								"../../time/**",
 								"../../api/controller",
 								"../../api/host",
 								"../../plugin/*",

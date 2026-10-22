@@ -34,7 +34,8 @@ const VAULT_DIR = `${REPO}/test/live/${VAULT_NAME}`.replace(/\\/g, "/");
 const PLUGIN_DIR = `${VAULT_DIR}/.obsidian/plugins/geb`;
 const SHOTS_DIR = `${REPO}/test/live/screenshots`;
 const OBSIDIAN = `${process.env.LOCALAPPDATA ?? ""}/Programs/Obsidian/Obsidian.com`;
-const CLI_TIMEOUT_MS = 60_000;
+/** Generous: a busy app answers the shim slowly, and the timeout is a last resort, not a budget. */
+const CLI_TIMEOUT_MS = 180_000;
 
 // --- what the checks may use inside the window ----------------------------------------------
 
@@ -48,6 +49,7 @@ interface LiveApp extends App {
 		readonly plugins: { readonly geb?: { readonly api: GebAPI | null } };
 	};
 	readonly commands: { executeCommandById(id: string): boolean };
+	readonly setting: { close(): void };
 }
 
 /** What the view serialises into the layout. */
@@ -72,6 +74,8 @@ declare const stage: () => { left: number; top: number; scale: number; ox: numbe
 declare const toScreen: (px: number, py: number) => { x: number; y: number };
 declare const gebLeaf: () => WorkspaceLeaf | null;
 declare const leafState: () => LeafState;
+/** Stop Chromium throttling this window's timers to once a second while another window covers it. */
+declare const unthrottle: () => void;
 /** Throws unless the image has decoded and the stage is fitted to a laid-out viewport. */
 declare const fitted: (what: string) => unknown;
 
@@ -106,6 +110,7 @@ const stage = () => {
 const toScreen = (px, py) => { const s = stage(); return { x: s.left + s.ox + px * s.scale, y: s.top + s.oy + py * s.scale }; };
 const gebLeaf = () => app.workspace.getLeavesOfType('geb-georef')[0] || null;
 const leafState = () => gebLeaf().getViewState().state || {};
+const unthrottle = () => { wc().setBackgroundThrottling(false); };
 const fitted = (what) => {
 	const img = q('.geb-image');
 	const vp = q('.geb-viewport').getBoundingClientRect();
@@ -242,20 +247,37 @@ async function loadPlugin(): Promise<void> {
 	await cli(["plugin:reload", "id=geb"]);
 	await inWindow(async () => {
 		await until("api.ready after reload", () => app.plugins.plugins.geb?.api?.ready === true, 15_000);
+		// MEASURED: with the fixture window behind the user's own, every 30 ms sleep in a check took a
+		// full second (Chromium throttles an occluded window's timers to 1 Hz) and the checks ran
+		// past the shim's timeout. Input events themselves cost a millisecond; it was the waits.
+		unthrottle();
 	}, null);
 }
 
-/** Whatever a previous run left behind: leaves, the written note and its folder, any modal. */
+/** The files the fixture vault is made of. Anything else in it is a previous run's debris. */
+const FIXTURE_FILES = ["README.md", "places/Alpha.md", "fixtures/map.png"];
+
+/**
+ * Whatever a previous run left behind: leaves, modals, the written note and its folder, and any
+ * file that is not fixture — a run killed mid-click once left an "Untitled" note behind, because
+ * a click meant for the map landed on the explorer's new-note button.
+ */
 async function resetFixture(): Promise<void> {
-	await inWindow(async (notePath) => {
+	await inWindow(async ({ notePath, keep }) => {
 		for (const l of app.workspace.getLeavesOfType("geb-georef")) l.detach();
 		for (const l of app.workspace.getLeavesOfType("image")) l.detach();
+		// CLOSED, not just removed from the DOM: a stray click once opened Settings, and a settings
+		// dialog whose element is gone but whose state is open is still open to the app.
+		app.setting.close();
 		for (const m of qa(".modal-container")) m.remove();
 		const folder = app.vault.getFolderByPath("maps");
 		if (folder !== null) await app.fileManager.trashFile(folder);
+		for (const f of app.vault.getFiles()) {
+			if (!keep.includes(f.path) && !f.path.startsWith("maps/")) await app.fileManager.trashFile(f);
+		}
 		await until("the note to be gone", () => app.vault.getAbstractFileByPath(notePath) === null, 5000);
 		await until("the index to drop it", () => api().listGeorefs().length === 0, 10_000);
-	}, NOTE_PATH);
+	}, { notePath: NOTE_PATH, keep: FIXTURE_FILES });
 }
 
 // --- the checks ----------------------------------------------------------------------------------
@@ -555,12 +577,14 @@ async function main(): Promise<number> {
 			console.error(`  skip ${check.name}`);
 			continue;
 		}
+		const started = Date.now();
+		const took = (): string => `${((Date.now() - started) / 1000).toFixed(1)} s`;
 		try {
 			const note = await check.run();
-			console.error(`  ok   ${check.name}\n       ${note}`);
+			console.error(`  ok   ${check.name} (${took()})\n       ${note}`);
 		} catch (e) {
 			failed += 1;
-			console.error(`  FAIL ${check.name}\n       ${e instanceof Error ? e.message : String(e)}`);
+			console.error(`  FAIL ${check.name} (${took()})\n       ${e instanceof Error ? e.message : String(e)}`);
 			try {
 				// What the app itself caught, so the cause sits in the same log as the symptom.
 				const errs = (await cli(["dev:errors"])).split(/\r?\n/).filter((l) => l.trim() !== "" && !/^No errors/.test(l));

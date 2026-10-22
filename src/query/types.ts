@@ -80,6 +80,8 @@ export type ProblemCode =
 	| "bad-certainty"
 	/** A text field — a date, a calendar name — holds something that is neither text nor a number. */
 	| "bad-text"
+	/** A date bound could not be read under its calendar, or the calendar has no adapter. Reported at query time, since adapters come and go. */
+	| "bad-date"
 	| "duplicate-id"
 	/** Loaded, but with data dropped; must not be saved until the user fixes it. */
 	| "lossy-record"

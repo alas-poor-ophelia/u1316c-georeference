@@ -568,6 +568,92 @@ const MUTANTS: readonly Mutant[] = [
 		find: "\t\tif (d2 <= r2 && d2 < bestD2) {",
 		replace: "\t\tif (d2 <= r2 && best === null) {",
 	},
+
+	// --- time: the shared line, the adapters and the filter --------------------------------
+	{
+		label: "the line's epoch is off by one day",
+		file: "src/time/line.ts",
+		find: "\treturn era * 146097 + doe - 719468;",
+		replace: "\treturn era * 146097 + doe - 719469;",
+	},
+	{
+		label: "the year adapter reads a year as the NEXT year's first day",
+		file: "src/time/adapters.ts",
+		find: "\t\tconst day = daysFromCivil(year, 1, 1);",
+		replace: "\t\tconst day = daysFromCivil(year + 1, 1, 1);",
+	},
+	{
+		label: "the filter is exclusive at the bounds",
+		file: "src/time/filter.ts",
+		find: "\treturn s.from <= at && at <= s.to;",
+		replace: "\treturn s.from < at && at < s.to;",
+	},
+	{
+		label: "a `to` written as a year ends on the year's FIRST day, not its last",
+		file: "src/time/filter.ts",
+		find: "\tconst to = read(d.to, \"geb-to\", Number.POSITIVE_INFINITY, true);",
+		replace: "\tconst to = read(d.to, \"geb-to\", Number.POSITIVE_INFINITY, false);",
+	},
+	{
+		label: "a throwing adapter takes the query surface down with it",
+		file: "src/time/adapters.ts",
+		find: "\t} catch (e) {\n\t\treturn { day: null, fault: `adapter",
+		replace: "\t} catch (e) {\n\t\tthrow e;\n\t\treturn { day: null, fault: `adapter",
+	},
+	{
+		label: "an adapter's answer is trusted without checking it is a day on the line",
+		file: "src/time/adapters.ts",
+		find: "\tif (!isDay(raw)) {",
+		replace: "\tif (false) {",
+	},
+	{
+		label: "the registry keys on the consumer's live object, so mutating its id afterwards corrupts it",
+		file: "src/api/time.ts",
+		find: "\treturn Object.freeze({ id: a.id, name: a.name, parse, format, ...(last === undefined ? {} : { last }) });",
+		replace: "\treturn a;",
+	},
+	{
+		label: "an absent `to` is NEGATIVE infinity (nothing is ever present)",
+		file: "src/time/filter.ts",
+		find: "\tconst to = read(d.to, \"geb-to\", Number.POSITIVE_INFINITY, true);",
+		replace: "\tconst to = read(d.to, \"geb-to\", Number.NEGATIVE_INFINITY, true);",
+	},
+	{
+		label: "an unreadable bound hides the feature instead of leaving that side open",
+		file: "src/time/filter.ts",
+		find: "\t\t\treturn absent;\n\t\t}\n\t\treturn got.day;",
+		replace: "\t\t\treturn Number.NaN;\n\t\t}\n\t\treturn got.day;",
+	},
+	{
+		label: "the calendar id is ignored: every bound is read under the default adapter (the phase-6 gate)",
+		file: "src/api/time.ts",
+		find: "\t\tif (calendar === undefined) return GREGORIAN_YEAR;\n\t\treturn this.adapters.get(calendar) ?? null;",
+		replace: "\t\treturn GREGORIAN_YEAR;",
+	},
+	{
+		label: "unregister is not identity-checked: a stale unregister removes someone else's adapter",
+		file: "src/api/time.ts",
+		find: "\t\t\tif (this.adapters.get(held.id) === held) this.adapters.delete(held.id);",
+		replace: "\t\t\tthis.adapters.delete(held.id);",
+	},
+	{
+		label: "a taken id (including the built-in) can be re-registered over",
+		file: "src/api/time.ts",
+		find: "\t\tif (this.adapters.has(held.id)) throw codedError(\"geb-duplicate-id\",",
+		replace: "\t\tif (false) throw codedError(\"geb-duplicate-id\",",
+	},
+	{
+		label: "date problems are never reported",
+		file: "src/api/controller.ts",
+		find: "\t\t\tif (s.problem !== null) out.push({ notePath: f.notePath, code: \"bad-date\", message: s.problem });",
+		replace: "\t\t\tvoid s;",
+	},
+	{
+		label: "featuresIn accepts a fractional or NaN `at`",
+		file: "src/api/controller.ts",
+		find: "\t\t\t\tif (!isDay(at)) throw codedError(\"geb-bad-argument\", `at must be a whole day",
+		replace: "\t\t\t\tif (false) throw codedError(\"geb-bad-argument\", `at must be a whole day",
+	},
 ];
 
 /** Per-mutant ceiling. The clean suite runs in well under a second, so this is generous. */

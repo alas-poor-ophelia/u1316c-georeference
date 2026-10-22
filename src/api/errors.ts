@@ -45,7 +45,11 @@ export type GebErrorCode =
 	 */
 	| "geb-lossy-record"
 	/** The arguments are the wrong shape — a non-finite coordinate, a negative index. */
-	| "geb-bad-argument";
+	| "geb-bad-argument"
+	/** No time adapter is registered under that calendar id. */
+	| "geb-unknown-calendar"
+	/** The object handed to `registerTimeAdapter` is not an adapter. */
+	| "geb-bad-adapter";
 
 export function codedError(code: GebErrorCode, message: string): CodedError {
 	return Object.assign(new Error(message), { code });
