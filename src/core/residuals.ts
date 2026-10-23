@@ -27,11 +27,18 @@
  *     identify which point is wrong.
  *   - It needs four points. With exactly three a thin-plate spline IS an affine transform.
  */
-import { NEARLY_COLLINEAR_RATIO, principalAxisRatio, wrapsAntimeridian } from "./geometry";
+import {
+	inMercatorPlane,
+	mercatorAffineRms,
+	NEARLY_COLLINEAR_RATIO,
+	principalAxisRatio,
+	wrapsAntimeridian,
+} from "./geometry";
 import { convexHull } from "./hull";
 import { solve } from "./linalg";
 import { fitMapping, INTERNAL_FOR_ORACLE, TpsMapping } from "./mapping";
-import type { ControlPoint, TransformOptions } from "./types";
+import { MERCATOR } from "./projection";
+import type { ControlPoint, TransformKind, TransformOptions } from "./types";
 
 export interface PointResidual {
 	readonly index: number;
@@ -193,8 +200,12 @@ const AFFINE_PARAMETERS = 3;
  * input whatsoever, which is not a tolerance to widen but a consequence of counting; `diagnose`
  * attaches the caveat.
  */
-export function affineResiduals(points: readonly ControlPoint[]): PointResidual[] {
-	const world = worldArray(points);
+export function affineResiduals(points: readonly ControlPoint[], kind: TransformKind = "affine"): PointResidual[] {
+	// A Mercator fit is judged in the plane it lives in. In raw lat/lng an affine cannot absorb
+	// the projection's curvature, so the display would report that curvature as a misplaced point
+	// on a map whose fit is good: on the twelve Britain control points, 6.22 px raw against
+	// 0.40 px in the Mercator plane.
+	const world = kind === "mercator" ? MERCATOR.forward(worldArray(points)) : worldArray(points);
 	const pixel = pixelArray(points);
 	const m = fitMapping(world, pixel, { kind: "affine" });
 	const out = new Float64Array(pixel.length);
@@ -295,9 +306,57 @@ export function tpsLooIndependent(m: TpsMapping): number[] {
 	return out;
 }
 
+/**
+ * How many times better a Mercator-plane affine must fit than a raw one before `diagnose` suggests
+ * the Mercator model. The ratio is raw RMS over Mercator RMS, both over the same control points.
+ *
+ * MEASURED on this code (2026-10-23), raw affine RMS over Mercator affine RMS:
+ *
+ *     CLEAN (warped equirectangular)          0.80        never fires
+ *     CLEAN_LINEAR (exact equirectangular)    1.7e-14     never fires
+ *     CLEAN_MERCATOR (exact Mercator)         exact       fires, factor printed as the cap, 99
+ *     BRITAIN_12 (a real Web Mercator map)    15.6        fires
+ *     Britain 5-point subsets (all 792)       p5 2.60, median 13.9, fires on 699 (88%)
+ *     Britain 6-point subsets (all 924)       p5 3.90, median 15.5, fires on 890 (96%)
+ *     Miller-like truth (three point sets)    1.17 to 1.22, never fires
+ *     equirectangular, 1 px jitter, 4,000     p95 0.58, max 2.53; fired on 0 (the floor holds)
+ *
+ * So 2.5 clears Miller by a factor of two and catches most five-point Britain sets. The ratio
+ * alone does not carry it: the jitter trial at 2.53 cleared the ratio and was held back only by
+ * the one-pixel floor on the raw side, and two of the three Miller sets also fail the floor on the
+ * Mercator side (2.2 and 7.8 px there; the third is under a pixel raw). The floors are part of the rule, not decoration.
+ */
+const MERCATOR_HINT_RATIO = 2.5;
+
+/** The printed factor is capped, because an exact Mercator fit makes the ratio infinite. */
+const MERCATOR_HINT_MAX_FACTOR = 99;
+
+/** Points below which the hint is never offered: at four an affine has one spare observation. */
+const MERCATOR_HINT_MIN_POINTS = 5;
+
+/**
+ * The factor to print in the Mercator hint, or `null` when the hint should not fire.
+ *
+ * FOUR CONDITIONS, and each one is there for a failure the others allow. Five points or more, so
+ * the comparison has more than one spare observation in it. The raw affine must be materially
+ * off (above the same one-pixel floor the outlier note uses), or there is nothing to fix. The
+ * Mercator affine must itself be at or below that floor, which is what keeps a NEAR-Mercator
+ * projection such as Miller from firing on a ratio alone: there a Mercator plane is better but
+ * still wrong. And the ratio must clear `MERCATOR_HINT_RATIO`.
+ */
+function mercatorHintFactor(points: readonly ControlPoint[], rawRms: number): number | null {
+	if (points.length < MERCATOR_HINT_MIN_POINTS) return null;
+	if (!(rawRms > MASKING_NOTE_FLOOR_PX)) return null;
+	const mercatorRms = mercatorAffineRms(points);
+	if (mercatorRms === null || !(mercatorRms <= MASKING_NOTE_FLOOR_PX)) return null;
+	const ratio = rawRms / mercatorRms;
+	if (!(ratio >= MERCATOR_HINT_RATIO)) return null;
+	return Math.min(MERCATOR_HINT_MAX_FACTOR, Math.round(ratio));
+}
+
 export function diagnose(points: readonly ControlPoint[], opts: TransformOptions): Diagnostics {
 	const hull = hullFlags(points);
-	const affine = affineResiduals(points);
+	const affine = affineResiduals(points, opts.kind);
 	const notes: string[] = [];
 
 	// ORDER IS NOT COSMETIC HERE. `trust` in the view shows `notes[0]` verbatim when there is
@@ -320,7 +379,7 @@ export function diagnose(points: readonly ControlPoint[], opts: TransformOptions
 	// error at a probe off the line, the affine RMS does not move off the placement-noise floor.
 	// So this is reported from the geometry of the points, never inferred from how well the fit
 	// reproduces them.
-	const ratio = principalAxisRatio(points);
+	const ratio = principalAxisRatio(opts.kind === "mercator" ? inMercatorPlane(points) : points);
 	if (ratio < NEARLY_COLLINEAR_RATIO) {
 		notes.push(
 			`The control points are nearly collinear (axis ratio ${ratio.toPrecision(2)}), so the fit is poorly determined across the line. Errors there are amplified by far more than the residuals below suggest, and those residuals cannot show it. Add points away from the line.`,
@@ -370,8 +429,27 @@ export function diagnose(points: readonly ControlPoint[], opts: TransformOptions
 		);
 	}
 
-	const base = { affine, affineRms: rms(affine.map((r) => r.error)), notes };
-	if (loo === undefined) return base;
+	const affineRms = rms(affine.map((r) => r.error));
+
+	// LAST, after every other note including the leave-one-out ones pushed below, because the
+	// status line shows `notes[0]`: this one is advice about a better model, never a reason to
+	// distrust the numbers in front of the user. Every return path goes through here.
+	const withHint = () => {
+		if (opts.kind !== "mercator") {
+			const factor = mercatorHintFactor(points, affineRms);
+			if (factor !== null) {
+				notes.push(
+					`These points fit a Mercator affine ${factor} times better than a flat one; the Mercator model may suit this map.`,
+				);
+			}
+		}
+	};
+
+	const base = { affine, affineRms, notes };
+	if (loo === undefined) {
+		withHint();
+		return base;
+	}
 
 	// Interior points only — see the note on `looRms`.
 	const interior = loo.filter((r) => !r.onHull).map((r) => r.error);
@@ -379,7 +457,9 @@ export function diagnose(points: readonly ControlPoint[], opts: TransformOptions
 		notes.push(
 			"Every control point is on the hull, so leave-one-out has nothing to say: each point is extrapolated to when left out. Four points are always in this position.",
 		);
+		withHint();
 		return { ...base, loo };
 	}
+	withHint();
 	return { ...base, loo, looRms: rms(interior) };
 }

@@ -16,7 +16,7 @@ sys.path.insert(0, str(HERE))
 import cases as C
 import refs
 
-TOL = 1e-9  # AGREES if max |Geb - ref| / (span of dst data) <= TOL
+TOL = 1e-9  # AGREES if max |Geb - ref| / (span of dst data) <= TOL (mercator: relative, see main)
 
 # Near-collinear control points are an ILL-CONDITIONED problem, and the reference is exact
 # rational arithmetic while Geb is float64 -- so a discrepancy there is the condition number
@@ -41,6 +41,8 @@ def reference(c):
         r["exact"] = refs.exact_ls(c["kind"], c["src"], c["dst"], c["probes"])
         r["lstsq"] = refs.np_lstsq(c["kind"], c["src"], c["dst"], c["probes"])
         r["primary"] = r["exact"]
+    elif c["kind"] == "mercator":
+        r["primary"] = refs.mercator_ls(c["direction"], c["src"], c["dst"], c["probes"])
     else:
         lam = c["lambda"] or 0.0
         for k, fn in (("scipy", refs.tps_scipy), ("hand", refs.tps_hand)):
@@ -87,6 +89,16 @@ def main():
             continue
         ma, mr, ms = stats(g["probeOut"], ref["primary"], span)
         t = tol_for(nm)
+        if c["kind"] == "mercator":
+            # TOLERANCE-BASED, not exact. The affine and polynomial2 references are exact rational
+            # arithmetic, so a gap there is Geb's float64 and nothing else. Here the projection
+            # (atanh/sin, and atan/sinh back) is transcendental: no rational reference exists, and
+            # Python's libm and Bun's can differ by an ulp or two before the fit amplifies it. So
+            # the verdict is a RELATIVE gap, per element against max(|ref|, 1) (the 1 keeps a
+            # probe that lands on 0 from turning rounding noise into an infinite ratio), judged
+            # at the plan's 1e-9. The span column is kept for the printout only.
+            ms = float(np.max(np.abs(np.array(g["probeOut"]) - np.array(ref["primary"]))
+                              / np.maximum(np.abs(np.array(ref["primary"])), 1.0)))
         verdict = "AGREES" if ms <= t else "DISAGREES"
         if verdict == "DISAGREES":
             FAILURES.append("%s: abs/span %.3e exceeds %g" % (nm, ms, t))

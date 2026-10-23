@@ -70,6 +70,7 @@ const EDIT_TIP = "Edit the control points";
 
 const MODELS: readonly { readonly kind: TransformKind; readonly name: string }[] = [
 	{ kind: "affine", name: "Affine" },
+	{ kind: "mercator", name: "Mercator (affine)" },
 	{ kind: "polynomial2", name: "Polynomial (2nd order)" },
 	{ kind: "tps", name: "Thin-plate spline" },
 ];

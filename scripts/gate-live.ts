@@ -81,6 +81,11 @@ declare const unthrottle: () => void;
 declare const fitted: (what: string) => unknown;
 
 /** Shipped ahead of every check. Plain JS in a string: it runs in the window, so no TS here. */
+// The fixture's names, above the prelude because the prelude bakes the id in.
+const GEOREF_ID = "map";
+const IMAGE_PATH = "fixtures/map.png";
+const NOTE_PATH = "maps/live/map.md";
+
 const PRELUDE = `
 const sleep = (ms) => new Promise((r) => window.setTimeout(r, ms));
 const until = async (what, pred, ms = 10000) => {
@@ -109,8 +114,10 @@ const stage = () => {
 	return { left: vp.left, top: vp.top, ox: Number(m[1]), oy: Number(m[2]), scale: Number(m[3]) };
 };
 const toScreen = (px, py) => { const s = stage(); return { x: s.left + s.ox + px * s.scale, y: s.top + s.oy + py * s.scale }; };
-const gebLeaf = () => app.workspace.getLeavesOfType('geb-georef')[0] || null;
-const leafState = () => gebLeaf().getViewState().state || {};
+// The gate's OWN map leaf, by id: the Guildmaster's other maps share this window (H-1620's
+// lesson, one tab over), and the first geb leaf in the workspace was theirs on 2026-10-23.
+const gebLeaf = () => app.workspace.getLeavesOfType('geb-georef').find((l) => (l.getViewState().state || {}).georefId === '${GEOREF_ID}') || null;
+const leafState = () => { const l = gebLeaf(); return (l && l.getViewState().state) || {}; };
 const unthrottle = () => { wc().setBackgroundThrottling(false); };
 const fitted = (what) => {
 	const img = q('.geb-image');
@@ -138,9 +145,6 @@ const POINTS = [
 	{ px: 40, py: 280, label: "SW" },
 ].map((p) => ({ ...p, ...world(p.px, p.py) }));
 type FixturePoint = (typeof POINTS)[number];
-const GEOREF_ID = "map";
-const IMAGE_PATH = "fixtures/map.png";
-const NOTE_PATH = "maps/live/map.md";
 
 // --- the shim -----------------------------------------------------------------------------------
 
@@ -267,9 +271,15 @@ const FIXTURE_FILES = ["README.md", "places/Alpha.md", "fixtures/map.png"];
  * a click meant for the map landed on the explorer's new-note button.
  */
 async function resetFixture(): Promise<void> {
-	await inWindow(async ({ notePath, keep }) => {
-		for (const l of app.workspace.getLeavesOfType("geb-georef")) l.detach();
-		for (const l of app.workspace.getLeavesOfType("image")) l.detach();
+	await inWindow(async ({ notePath, keep, id, imagePath }) => {
+		// ONLY THE GATE'S OWN LEAVES. The Guildmaster's maps and images share this window.
+		for (const l of app.workspace.getLeavesOfType("geb-georef")) {
+			const st = (l.getViewState().state ?? {}) as { georefId?: unknown; create?: { notePath?: unknown } };
+			if (st.georefId === id || st.create?.notePath === notePath) l.detach();
+		}
+		for (const l of app.workspace.getLeavesOfType("image")) {
+			if ((l.view as { file?: { path?: string } | null }).file?.path === imagePath) l.detach();
+		}
 		// CLOSED, not just removed from the DOM: a stray click once opened Settings, and a settings
 		// dialog whose element is gone but whose state is open is still open to the app.
 		app.setting.close();
@@ -287,7 +297,7 @@ async function resetFixture(): Promise<void> {
 		await until("the note to be gone", () => app.vault.getAbstractFileByPath(notePath) === null, 5000);
 		// ITS OWN note only: the vault may hold other maps, the hand-test fixtures among them.
 		await until("the index to drop it", () => !api().listGeorefs().some((g) => g.notePath === notePath), 10_000);
-	}, { notePath: NOTE_PATH, keep: FIXTURE_FILES });
+	}, { notePath: NOTE_PATH, keep: FIXTURE_FILES, id: GEOREF_ID, imagePath: IMAGE_PATH });
 }
 
 // --- the checks ----------------------------------------------------------------------------------
@@ -428,6 +438,53 @@ const CHECKS: readonly Check[] = [
 			),
 	},
 	{
+		name: "the Mercator model can be chosen, saved and reloaded",
+		run: () =>
+			inWindow(
+				async ({ id, notePath }: { id: string; notePath: string }) => {
+					// Only the model round trip is asserted: the fixture is equirectangular, so a Mercator
+					// fit's RMS here says nothing about the model, and the checks below were written against
+					// the default model, which is restored at the end.
+					const choose = async (kind: string, unsavedFirst: boolean): Promise<void> => {
+						// Edit is DISABLED while a save awaits the index (the post-write window is a state,
+						// not a flag), and the check before this one ends on the graticule, not on that
+						// window closing. Wait for the door to open before pushing it.
+						await until("Edit to be offered", () => !buttonNamed("Edit", ".geb-toolbar")!.disabled, 15_000);
+						buttonNamed("Edit", ".geb-toolbar")!.click();
+						await until("the edit bar", () => q(".geb-edit-bar")!.style.display !== "none");
+						const select = q(".geb-edit-bar select") as HTMLSelectElement | null;
+						if (select === null) throw new Error("no model select in the edit bar");
+						select.value = kind;
+						select.dispatchEvent(new Event("change", { bubbles: true }));
+						if (unsavedFirst) await until(`the status to name ${kind}`, () => (q(".geb-status")?.textContent ?? "").startsWith(`${kind}, 4 points`));
+						buttonNamed("Save", ".geb-edit-bar")!.click();
+						await until("the save to land", () => !/unsaved/.test(q(".geb-status")?.textContent ?? "") && api().getFit(id).model === kind, 15_000);
+						await until("the edit bar to hide", () => q(".geb-edit-bar")!.style.display === "none");
+					};
+					// Whatever model the note had, it has again afterwards, even if a step throws:
+					// the checks after this one were written against the default and share the note.
+					const original = api().getFit(id).model;
+					let stored: unknown;
+					let status = "";
+					try {
+						await choose("mercator", true);
+						const file = app.vault.getFileByPath(notePath);
+						if (file === null) throw new Error("the saved note is missing");
+						await until("the note's frontmatter to carry the model", () => {
+							const fits = app.metadataCache.getFileCache(file)?.frontmatter?.["geb-fits"] as { transform?: { model?: unknown } }[] | undefined;
+							stored = fits?.[0]?.transform?.model;
+							return stored === "mercator";
+						}, 15_000);
+						status = q(".geb-status")?.textContent ?? "";
+					} finally {
+						if (api().getFit(id).model !== original) await choose(original, false);
+					}
+					return `stored model ${String(stored)}, status "${status}"; restored to ${api().getFit(id).model}`;
+				},
+				{ id: GEOREF_ID, notePath: NOTE_PATH },
+			),
+	},
+	{
 		name: "the doors: a ribbon icon lists the maps, and a georeference note's header action opens its map",
 		run: () =>
 			inWindow(
@@ -437,10 +494,13 @@ const CHECKS: readonly Check[] = [
 					if (file === null) throw new Error("the saved note is missing");
 					const noteLeaf = app.workspace.getLeaf(true);
 					await noteLeaf.openFile(file);
-					await until("the note's header action", () => q('.view-action[aria-label="Open map"]') !== null);
+					// THIS note's action, not the first in the document: the Guildmaster's own georef
+					// note was open one tab over, and its door opened their map, not ours.
+					const action = (): HTMLElement | null => noteLeaf.view.containerEl.querySelector('.view-action[aria-label="Open map"]');
+					await until("the note's header action", () => action() !== null);
 					// From a closed map, so the action is seen to OPEN one rather than reveal one.
-					for (const l of app.workspace.getLeavesOfType("geb-georef")) l.detach();
-					q('.view-action[aria-label="Open map"]')!.click();
+					gebLeaf()?.detach();
+					action()!.click();
 					await until("the map leaf", () => gebLeaf() !== null);
 					await until("the leaf to take its state", () => leafState().georefId === id);
 					noteLeaf.detach();
@@ -568,8 +628,8 @@ const CHECKS: readonly Check[] = [
 					// Give the leaf a moment to settle, then it must be fitted and the image decoded.
 					await sleep(500);
 					fitted("after reload");
-					const leaves = app.workspace.getLeavesOfType("geb-georef").length;
-					if (leaves !== 1) throw new Error(`${leaves} leaves after reload`);
+					const leaves = app.workspace.getLeavesOfType("geb-georef").filter((l) => (l.getViewState().state ?? {}).georefId === id).length;
+					if (leaves !== 1) throw new Error(`${leaves} of our leaves after reload`);
 					if (leafState().georefId !== id) throw new Error("leaf lost its id");
 					return `1 leaf, status "${q(".geb-status")!.textContent ?? ""}"`;
 				},

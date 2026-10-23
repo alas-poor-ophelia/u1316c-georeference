@@ -25,9 +25,11 @@ import type { TransformOptions } from "../../src/core/types";
 
 interface Case {
 	readonly name: string;
-	readonly kind: "affine" | "polynomial2" | "tps";
+	readonly kind: "affine" | "polynomial2" | "tps" | "mercator";
 	/** `null` or absent both mean "do not pass a lambda at all". */
 	readonly lambda?: number | null;
+	/** Only `mercator` reads it: which side of the fit holds [lat, lng]. Absent means "forward". */
+	readonly direction?: "forward" | "reverse" | null;
 	readonly src: number[];
 	readonly dst: number[];
 	readonly probes: number[];
@@ -49,7 +51,10 @@ for (const c of cases) {
 		const opts: TransformOptions =
 			c.lambda === null || c.lambda === undefined ? { kind: c.kind } : { kind: c.kind, lambda: c.lambda };
 
-		const m = fitMapping(Float64Array.from(c.src), Float64Array.from(c.dst), opts);
+		const m =
+				c.direction === null || c.direction === undefined
+					? fitMapping(Float64Array.from(c.src), Float64Array.from(c.dst), opts)
+					: fitMapping(Float64Array.from(c.src), Float64Array.from(c.dst), opts, c.direction);
 
 		const probeOut = new Float64Array(c.probes.length);
 		m.apply(Float64Array.from(c.probes), probeOut);

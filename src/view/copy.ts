@@ -31,6 +31,7 @@ export const COPY = {
 		affine: "A flat stretch, rotate and shear. Needs 3 points, and 4 is better. It cannot bend, so it suits a handful of points or a map drawn to a consistent projection.",
 		polynomial2: "Adds gentle curvature for maps that warp smoothly. Needs 6 points and is barely determined at 6 or 7, so 8 or more are recommended.",
 		tps: "Bends to pass exactly through every point. Needs 3 points, where it matches affine, and shines from about 6 well-spread points on scanned or hand-drawn maps. The default for a new map.",
+		mercator: "An affine fitted after projecting coordinates as web map tiles and modern atlases are drawn. Needs 3 points, and 4 is better. Exact on a Mercator base, where a flat affine drifts. Worse than the spline elsewhere. Its RMS is measured in the projected plane, and control points above 85 degrees of latitude are refused.",
 		spread: "Spread matters more than count: four points spanning the map beat eight along one edge. The dashed outline joins the outermost points. Inside it the fit is trusted, outside it error grows with distance. In one test, four points along a single wall scored 0.3 px RMS yet placed a distant town 20 px off.",
 		rms: "The RMS shows how closely an affine fit matches your points, in image pixels, and it is shown for every model on purpose: a spline passes exactly through its points and would read zero even with a mistyped coordinate. A low RMS means your points agree with each other, not that the map is right far from them.",
 		button: "Which model?",
@@ -42,6 +43,9 @@ export const COPY = {
 		button: "Details",
 		tip: "Open the full fit report",
 		rms: "Affine RMS (px)",
+		/** The Mercator model's residual lives in the projected plane, so its label and the status line say so. */
+		rmsMercator: "Affine RMS in the Mercator plane (px)",
+		planeSuffix: "in Mercator plane",
 		worst: "Largest error (px)",
 		loo: "Leave-one-out (px)",
 		coverage: (pct: number): string => `Control points span ${pct}% of the image`,

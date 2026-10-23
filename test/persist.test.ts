@@ -31,6 +31,13 @@ describe("frontmatter round trip", () => {
 		expect(value).toEqual(GEOREF);
 	});
 
+	test("the mercator model survives intact, with no lambda gained", () => {
+		const record: Georeference = { ...GEOREF, fits: [{ ...GEOREF.fits[0]!, transform: { model: "mercator" } }] };
+		const { value, problems } = fromFrontmatter(toFrontmatter(record));
+		expect(problems).toEqual([]);
+		expect(value).toEqual(record);
+	});
+
 	test("a point with no label does not gain an undefined one", () => {
 		const fm = toFrontmatter(GEOREF);
 		const fits = fm[KEY.fits] as { points: Record<string, unknown>[] }[];
@@ -57,6 +64,12 @@ describe("reading frontmatter never throws, whatever is in it", () => {
 			expect(r.problems.length).toBeGreaterThan(0);
 		});
 	}
+
+	test("an unknown model's problem tells an older build the note may come from a newer Geb", () => {
+		const fm = { [KEY.id]: "x", [KEY.image]: "[[a.png]]", [KEY.fits]: [{ transform: { model: "future" }, points: [] }] };
+		const r = fromFrontmatter(fm);
+		expect(r.problems.join("\n")).toContain("(a model this Geb does not know may come from a newer Geb)");
+	});
 
 	test("too few points for the chosen model is refused with a count", () => {
 		const fm = toFrontmatter(GEOREF);

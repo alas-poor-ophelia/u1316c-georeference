@@ -309,6 +309,23 @@ describe("the readout and the trust summary", () => {
 		expect(t.summary).toContain("worst point 2 4.8 px");
 	});
 
+	test("a Mercator fit's RMS names its plane; no other model's does", () => {
+		const mercator = trust({ ...fit(), model: "mercator" });
+		expect(mercator.summary).toContain(`RMS 2.6 px ${COPY.report.planeSuffix}`);
+		expect(trust({ ...fit(), model: "affine" }).summary).not.toContain(COPY.report.planeSuffix);
+	});
+
+	test("the full summary string is pinned for each model, so the separator placement cannot drift", () => {
+		expect(trust({ ...fit(), model: "affine" }).summary).toBe("affine, 8 points · RMS 2.6 px · worst point 2 4.8 px");
+		expect(trust({ ...fit(), model: "polynomial2" }).summary).toBe(
+			"polynomial2, 8 points · RMS 2.6 px · worst point 2 4.8 px",
+		);
+		expect(trust(fit()).summary).toBe("tps, 8 points · RMS 2.6 px · worst point 2 4.8 px");
+		expect(trust({ ...fit(), model: "mercator" }).summary).toBe(
+			"mercator, 8 points · RMS 2.6 px in Mercator plane · worst point 2 4.8 px",
+		);
+	});
+
 	test("an unlabelled point is named by its position, one-based", () => {
 		// "point 0" is meaningless to someone counting pins on a screen.
 		expect(trust(fit()).worst!.label).toBe("point 2");

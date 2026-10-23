@@ -1,6 +1,7 @@
 """Case construction (seeded, deterministic). build() returns a list of case dicts."""
 import math
 import numpy as np
+import refs
 
 
 def rot(theta, s):
@@ -18,8 +19,9 @@ def build():
     rng = np.random.default_rng(20261020)
     cases = []
 
-    def add(name, kind, src, dst, probes, lam=None, truth=None, note=""):
-        cases.append(dict(name=name, kind=kind, **{"lambda": lam}, src=np.asarray(src, float).ravel().tolist(),
+    def add(name, kind, src, dst, probes, lam=None, truth=None, note="", direction=None):
+        cases.append(dict(name=name, kind=kind, direction=direction, **{"lambda": lam},
+                          src=np.asarray(src, float).ravel().tolist(),
                           dst=np.asarray(dst, float).ravel().tolist(),
                           probes=np.asarray(probes, float).ravel().tolist(), truth=truth, note=note))
 
@@ -103,4 +105,45 @@ def build():
         Dn = P @ Rn.T + tn + rng.normal(0, 1e-6, P.shape)
         add(f"7_poly2_nearline_eps{eps:g}", "polynomial2", P, Dn, probes7(P))
         add(f"7_tps0_nearline_eps{eps:g}", "tps", P, Dn, probes7(P), lam=0.0)
+
+    # 8. mercator. Each fixture is a forward case (world [lat, lng] -> pixel) and a reverse case
+    # (pixel -> world), because geb_eval fits one direction per case. World coordinates are
+    # [lat, lng] pairs. The truth is the closed form in refs.py, never Geb. The data are exact under
+    # the model, so Geb, the exact-rational reference and the truth must all agree.
+    my = refs.merc_y
+
+    def merc_case(tag, world, to_px, fwd_extra, rev_extra, note):
+        """world: control points [lat, lng]; to_px(lat, lng) -> pixel; *_extra: worlds probed beyond
+        the control points (forward) and pixels-by-world probed in reverse."""
+        W = np.asarray(world, float).reshape(-1, 2)
+        Px = np.array([to_px(la, ln) for la, ln in W])
+        fprobe = np.vstack([W.mean(axis=0) + [[0.0, 0.0], [0.4, -0.7], [-0.5, 1.1]], np.asarray(fwd_extra, float)])
+        add(f"8{tag}_mercator_fwd", "mercator", W, Px, fprobe, direction="forward",
+            truth=np.array([to_px(la, ln) for la, ln in fprobe]).ravel().tolist(), note=note)
+        rworld = np.vstack([fprobe[:3], np.asarray(rev_extra, float)])
+        rpx = np.array([to_px(la, ln) for la, ln in rworld])
+        add(f"8{tag}_mercator_rev", "mercator", Px, W, rpx, direction="reverse",
+            truth=rworld.ravel().tolist(), note=note)
+
+    # 8a. CLEAN_MERCATOR from test/fixtures.ts: eight British places under
+    # px = (lng + 8) * 200, py = (my(60) - my(lat)) * 300.
+    places = [(51.51, -0.13), (53.96, -1.08), (55.95, -3.19), (51.48, -3.18),
+              (52.63, 1.3), (50.72, -3.53), (54.89, -2.93), (57.15, -2.09)]
+    merc_case("a", places, lambda la, ln: ((ln + 8) * 200, (my(60) - my(la)) * 300),
+              fwd_extra=[(84.0, -2.0)], rev_extra=[(88.0, -2.0)],
+              note="CLEAN_MERCATOR shape. Forward probe (84, -2) is far beyond the control hull; its pixel "
+                   "is (1200, -28047.58) (y = (my(60)-my(84))*300, above the 60 N origin). Reverse probe is the "
+                   "pixel (1200, -46945.31) of (88, -2); it must unproject to lat 88 "
+                   "(past the 85.05 control limit, inside the 89.9 evaluation limit).")
+
+    # 8b. a 40-60 N band, 6 points, under a rotated and sheared affine in the projected plane:
+    # [px, py] = M @ [my(lat), lng] + [500, 700], M = 40 * R(30 deg) @ [[1, 0.25], [0, 1]]
+    # (30 degree rotation, 40 px/deg scale, 0.25 shear of the lng term into the y term).
+    M = rot(math.radians(30), 40.0) @ np.array([[1.0, 0.25], [0.0, 1.0]])
+    band = [(40.5, -10.0), (43.0, 4.0), (47.0, -4.0), (51.0, 8.0), (55.0, -1.0), (59.5, 12.0)]
+    merc_case("b", band, lambda la, ln: tuple(M @ [my(la), ln] + [500.0, 700.0]),
+              fwd_extra=[(84.0, 3.0)], rev_extra=[(88.0, 3.0)],
+              note="band 40-60 N, affine M @ [my(lat), lng] + [500, 700], M = 40 R(30deg) [[1,.25],[0,1]]. "
+                   "Forward probe (84, 3) -> pixel (6318.51, 4197.88); reverse probe pixel "
+                   "(8500.64, 5457.73) must unproject to (88, 3).")
     return cases

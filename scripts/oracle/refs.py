@@ -4,6 +4,9 @@ Reference implementations for the Geb oracle.  Nothing here imports Geb.
     rounding) on RAW real-unit coordinates, plus numpy.linalg.lstsq as a second opinion.
   * tps : scipy.interpolate.RBFInterpolator(kernel=thin_plate_spline, degree=1), plus a
     hand-assembled bordered system solved with numpy as a second opinion.
+  * mercator : the same exact rational affine, run in the Mercator-projected plane. The projection
+    is written here from the closed form (degrees(atanh(sin(radians(lat)))) and its inverse),
+    never taken from Geb. Only the projection is transcendental, so only that step is float.
 Outputs are final probe values in real units; coefficients are never compared.
 """
 import math
@@ -42,6 +45,28 @@ def exact_ls(kind, src, dst, probes):
         res.append(float(sum(c * v for c, v in zip(coefs[0], b))))
         res.append(float(sum(c * v for c, v in zip(coefs[1], b))))
     return res
+
+
+def merc_y(lat):
+    """Mercator ordinate of a latitude, in degrees (same scale as longitude)."""
+    return math.degrees(math.atanh(math.sin(math.radians(lat))))
+
+
+def merc_lat(y):
+    """Latitude of a Mercator ordinate given in degrees."""
+    return math.degrees(math.atan(math.sinh(math.radians(y))))
+
+
+def mercator_ls(direction, src, dst, probes):
+    """Affine in the projected plane. Interleaved [lat, lng] is the WORLD side: src when forward
+    (world -> pixel), dst when reverse (pixel -> world). Output is in the probes' target units."""
+    def proj(a):
+        return [merc_y(a[i]) if i % 2 == 0 else a[i] for i in range(len(a))]
+
+    if direction == "reverse":
+        out = exact_ls("affine", src, proj(dst), probes)
+        return None if out is None else [merc_lat(v) if i % 2 == 0 else v for i, v in enumerate(out)]
+    return exact_ls("affine", proj(src), dst, proj(probes))
 
 
 def np_lstsq(kind, src, dst, probes):

@@ -23,6 +23,14 @@ export { NEARLY_COLLINEAR_RATIO, principalAxisRatio, wrapsAntimeridian } from ".
 export { convexHull, inHull, type Vec2 } from "./hull";
 export { fitMapping, TpsMapping } from "./mapping";
 export {
+	MERCATOR,
+	MERCATOR_CONTROL_LAT,
+	MERCATOR_EVAL_LAT,
+	mercatorLat,
+	mercatorY,
+	type Projection,
+} from "./projection";
+export {
 	affineResiduals,
 	diagnose,
 	tpsLooIndependent,

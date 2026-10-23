@@ -17,7 +17,7 @@
 export const API_VERSION = 1;
 
 /** *(API 1)* */
-export type TransformKind = "affine" | "polynomial2" | "tps";
+export type TransformKind = "affine" | "polynomial2" | "tps" | "mercator";
 
 /** *(API 1)* */
 export interface TransformOptions {

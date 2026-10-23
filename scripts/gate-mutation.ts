@@ -239,6 +239,36 @@ const MUTANTS: readonly Mutant[] = [
 		replace: "\t\tif (false) return null;",
 	},
 
+	// --- projection.ts and the mercator model ---------------------------------------------
+	{
+		// Killed by "mercatorY(60) / mercatorY(30) equals the textbook ..." in mercator.test.ts.
+		label: "Mercator ordinate loses its atanh (sin(lat) is not a projection)",
+		file: "src/core/projection.ts",
+		find: "\treturn Math.atanh(Math.sin(latDeg * RAD)) / RAD;",
+		replace: "\treturn Math.sin(latDeg * RAD) / RAD;",
+	},
+	{
+		// Killed by "the reverse fit returns the world coordinate to under 1e-9 degrees ...".
+		label: "mercator reverse fit never unprojects (toLatLng answers a Mercator ordinate as a latitude)",
+		file: "src/core/mapping.ts",
+		find: "\t\t\tprojection.inverse(d.subarray(0, s.length));",
+		replace: "\t\t\tvoid d;",
+	},
+	{
+		// Killed by "a control point at lat 86 is refused, naming the point and the limit".
+		label: "Mercator control limit moved to the pole (a point off the tile is fitted)",
+		file: "src/core/projection.ts",
+		find: "export const MERCATOR_CONTROL_LAT = 85.05112878;",
+		replace: "export const MERCATOR_CONTROL_LAT = 90;",
+	},
+	{
+		// Killed by "6 CLEAN_MERCATOR points: mercator's affineRms is below 1e-6 px ...".
+		label: "mercator residuals judged in raw lat/lng (an exact fit reads as several pixels off)",
+		file: "src/core/residuals.ts",
+		find: "const world = kind === \"mercator\" ? MERCATOR.forward(worldArray(points)) : worldArray(points);",
+		replace: "const world = worldArray(points);",
+	},
+
 	// --- graticule.ts: inclusive really means inclusive -----------------------------------
 	{
 		label: "boundary tick lost to floating-point division again",

@@ -23,7 +23,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 const finiteNumber = (v: unknown): number | null =>
 	typeof v === "number" && Number.isFinite(v) ? v : null;
 
-const KINDS: readonly TransformKind[] = ["affine", "polynomial2", "tps"];
+const KINDS: readonly TransformKind[] = ["affine", "mercator", "polynomial2", "tps"];
 const isKind = (v: unknown): v is TransformKind => typeof v === "string" && (KINDS as readonly string[]).includes(v);
 
 /** Collects problems and tracks whether anything was dropped rather than defaulted. */
@@ -129,7 +129,7 @@ function parseFit(v: unknown, where: string, ctx: Ctx): StoredFit | null {
 
 	const t = v.transform;
 	if (!isRecord(t) || !isKind(t.model)) {
-		ctx.problems.push(`${where} needs a transform with a model of ${KINDS.join(", ")}`);
+		ctx.problems.push(`${where} needs a transform with a model of ${KINDS.join(", ")} (a model this Geb does not know may come from a newer Geb)`);
 		ctx.lossy = true;
 		return null;
 	}

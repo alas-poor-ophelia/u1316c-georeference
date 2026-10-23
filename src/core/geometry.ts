@@ -24,6 +24,7 @@
  * told what it rests on.
  */
 import { fitMapping } from "./mapping";
+import { mercatorY } from "./projection";
 import type { ControlPoint } from "./types";
 
 /**
@@ -42,7 +43,9 @@ import type { ControlPoint } from "./types";
  *
  * Computed on the WORLD side, in the same `x = lng, y = lat` convention the hull uses, because
  * that is the side whose coordinates the user typed. It is a property of the configuration rather
- * than of either fit direction.
+ * than of either fit direction. For the `mercator` model `diagnose` asks it of `inMercatorPlane`
+ * instead, because that is the plane the fit is determined in. The two differ, but not near the
+ * threshold on a real map: on the twelve Britain control points, 0.71 raw against 0.50 projected.
  *
  * Returns 1 for fewer than two points: with nothing to compare there is no anisotropy to report,
  * and claiming degeneracy on a single point would be a warning about nothing.
@@ -153,6 +156,24 @@ function affineRms(points: readonly ControlPoint[]): number | null {
 		// A degenerate configuration is not evidence of a wrap. It has its own error path.
 		return null;
 	}
+}
+
+/**
+ * The same control points with each latitude replaced by its Mercator ordinate, in degrees: the
+ * plane the `mercator` model fits in. Longitude, pixels and labels are untouched, so anything
+ * written against `ControlPoint` (the axis ratio, an affine RMS) can be asked about that plane.
+ */
+export function inMercatorPlane(points: readonly ControlPoint[]): ControlPoint[] {
+	return points.map((p) => ({ ...p, lat: mercatorY(p.lat) }));
+}
+
+/**
+ * RMS of an affine fit in the Mercator plane, or `null` if it cannot fit there — including a
+ * point past the evaluation limit, whose NaN ordinate the fitter refuses as non-finite. The
+ * quantity the Mercator hint in `diagnose` compares against the raw affine RMS.
+ */
+export function mercatorAffineRms(points: readonly ControlPoint[]): number | null {
+	return affineRms(inMercatorPlane(points));
 }
 
 /** How much better the unwrapped fit must be before a wrap is the better explanation. */

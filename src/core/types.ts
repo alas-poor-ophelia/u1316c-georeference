@@ -28,13 +28,14 @@ export interface ControlPoint {
 	readonly label?: string;
 }
 
-export type TransformKind = "affine" | "polynomial2" | "tps";
+export type TransformKind = "affine" | "polynomial2" | "tps" | "mercator";
 
 /** The minimum number of control points each model needs before it can be fitted at all. */
 export const MIN_POINTS: Readonly<Record<TransformKind, number>> = {
 	affine: 3,
 	polynomial2: 6,
 	tps: 3,
+	mercator: 3,
 };
 
 /**
@@ -55,6 +56,8 @@ export const RECOMMENDED_POINTS: Readonly<Record<TransformKind, number>> = {
 	affine: 4,
 	polynomial2: 8,
 	tps: 8,
+	// The same three-point exactness as affine, because it IS an affine fit, in the projected plane.
+	mercator: 4,
 };
 
 /**

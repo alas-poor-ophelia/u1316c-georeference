@@ -163,6 +163,11 @@ still holding the pre-write frontmatter and publish that as current — determin
 first write a UI makes. So the index keeps describing the previous state until Obsidian says
 otherwise, and then the matching change event fires.
 
+**The model kinds** are `affine`, `mercator`, `polynomial2` and `tps`. `mercator` is an affine fitted
+in Web-Mercator-projected coordinates, which fits a Mercator-projected source map exactly; it needs 3
+points (4 recommended), refuses control points beyond 85.05 degrees of latitude, and reports its
+residuals in the projected plane, not in raw latitude and longitude.
+
 ## A worked example
 
 Pinned by a test, so it cannot drift from the code:

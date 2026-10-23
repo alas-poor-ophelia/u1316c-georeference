@@ -12,6 +12,7 @@
 import { InvalidInputError } from "./errors";
 import { convexHull, inHull, type Vec2 } from "./hull";
 import { fitMapping } from "./mapping";
+import { MERCATOR_CONTROL_LAT } from "./projection";
 import { diagnose, type Diagnostics } from "./residuals";
 import { MIN_POINTS, type ControlPoint, type LatLng, type Mapping, type TransformKind, type TransformOptions } from "./types";
 import { roundTrip, roundTripFromPixel, roundTripTolerance } from "./validity";
@@ -78,6 +79,13 @@ function validate(points: readonly ControlPoint[], opts: TransformOptions): void
 		for (const [name, v] of [["px", p.px], ["py", p.py], ["lat", p.lat], ["lng", p.lng]] as const) {
 			if (!Number.isFinite(v)) throw new InvalidInputError(`${where} has a non-finite ${name}: ${v}`);
 		}
+		// A point past the tile limit cannot be ON a Web Mercator map, so it is a typo or the wrong
+		// model, and fitting it would anchor the affine to an ordinate that grows without bound.
+		if (opts.kind === "mercator" && Math.abs(p.lat) > MERCATOR_CONTROL_LAT) {
+			throw new InvalidInputError(
+				`${where} has latitude ${p.lat}, beyond the Mercator model's limit of ±${MERCATOR_CONTROL_LAT}°`,
+			);
+		}
 	});
 }
 
@@ -112,8 +120,8 @@ export function buildFit(
 	return {
 		kind: opts.kind,
 		points: [...points],
-		forward: fitMapping(world, pixel, opts),
-		reverse: fitMapping(pixel, world, opts),
+		forward: fitMapping(world, pixel, opts, "forward"),
+		reverse: fitMapping(pixel, world, opts, "reverse"),
 		hull: hullXY.map((v) => ({ lat: v.y, lng: v.x })),
 		hullXY,
 		bounds,

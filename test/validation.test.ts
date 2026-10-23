@@ -6,7 +6,7 @@ import { fitMapping } from "../src/core/mapping";
 import { diagnose } from "../src/core/residuals";
 import { CLEAN, COLLINEAR, IMAGE, jittered } from "./fixtures";
 
-const MODELS = ["affine", "polynomial2", "tps"] as const;
+const MODELS = ["affine", "mercator", "polynomial2", "tps"] as const;
 
 describe("degenerate geometry is refused, not answered wrongly", () => {
 	test("collinear control points throw rather than returning garbage", () => {

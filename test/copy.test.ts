@@ -12,6 +12,10 @@ describe("model descriptions agree with the kernel's point counts", () => {
 		expect(COPY.models.affine).toContain(`Needs ${MIN_POINTS.affine} points`);
 		expect(COPY.models.affine).toContain(`${RECOMMENDED_POINTS.affine} is better`);
 	});
+	test("mercator", () => {
+		expect(COPY.models.mercator).toContain(`Needs ${MIN_POINTS.mercator} points`);
+		expect(COPY.models.mercator).toContain(`${RECOMMENDED_POINTS.mercator} is better`);
+	});
 	test("polynomial2", () => {
 		expect(COPY.models.polynomial2).toContain(`Needs ${MIN_POINTS.polynomial2} points`);
 		expect(COPY.models.polynomial2).toContain(`${RECOMMENDED_POINTS.polynomial2} or more`);

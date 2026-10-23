@@ -14,7 +14,9 @@ import type { FitReport, FitReportRow, FrameEdit } from "./shell";
 
 /** The report's summary as term and value pairs, omitting what the fit cannot say. */
 export function reportSummary(report: FitReport): [string, string][] {
-	const lines: [string, string][] = [[COPY.report.rms, report.rms.toFixed(1)]];
+	// The Mercator model's RMS is measured in the projected plane, so the row says so.
+	const rmsLabel = report.model === "mercator" ? COPY.report.rmsMercator : COPY.report.rms;
+	const lines: [string, string][] = [[rmsLabel, report.rms.toFixed(1)]];
 	if (report.worst !== null) lines.push([COPY.report.worst, `${report.worst.label} ${report.worst.error.toFixed(1)} px`]);
 	if (report.looRms !== null) lines.push([COPY.report.loo, report.looRms.toFixed(1)]);
 	return lines;
@@ -83,6 +85,7 @@ export class FitReportModal extends Modal {
 
 const MODEL_TEXT: Readonly<Record<TransformKind, string>> = {
 	affine: COPY.models.affine,
+	mercator: COPY.models.mercator,
 	polynomial2: COPY.models.polynomial2,
 	tps: COPY.models.tps,
 };

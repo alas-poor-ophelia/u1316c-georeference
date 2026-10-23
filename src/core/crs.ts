@@ -24,11 +24,13 @@ export interface Crs {
 	/**
 	 * What the source map's own projection is, where known. `unknown` lets the spline absorb it.
 	 *
-	 * DECLARATIVE ONLY IN v1 — THE FITTERS DO NOT READ IT, and anything that registers a
-	 * non-equirectangular CRS has to deal with that first. Geb's models are linear (or
-	 * polynomial, or spline) in the raw lat/lng pair, so a genuinely Mercator source carries a
-	 * systematic error that grows with the latitude span. Measured over 200 interior points on a
-	 * 4,000 px image, worst error:
+	 * DECLARATIVE ONLY — THE FITTERS DO NOT READ THIS FIELD. The way to fit a Mercator source
+	 * exactly is the `"mercator"` transform kind, which the user picks per map; it does not
+	 * consult `projection`, and anything that registers a non-equirectangular CRS still has to
+	 * deal with that. The other models are linear (or polynomial, or spline) in the raw lat/lng
+	 * pair, so a genuinely Mercator source fitted by them carries a systematic error that grows
+	 * with the latitude span, and that error is why the kind exists. Measured over 200 interior
+	 * points on a 4,000 px image, worst error:
 	 *
 	 *       latitude span     affine     polynomial2     tps
 	 *       49-52°             44 px        1.3 px       48 px

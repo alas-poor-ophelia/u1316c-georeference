@@ -14,6 +14,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { ApiController } from "../src/api/controller";
+import { MIN_POINTS } from "../src/core/types";
 import { hashBytes } from "../src/persist/identity";
 import { toFrontmatter } from "../src/persist/serialize";
 import type { Georeference } from "../src/persist/types";
@@ -78,6 +79,12 @@ describe("API.md cannot drift from the surface", () => {
 		const events = [...union.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!);
 		expect(events.length).toBe(5);
 		expect(firstColumn(section("events")).sort()).toEqual([...events].sort());
+	});
+
+	test("every transform kind is named in the doc", () => {
+		// MIN_POINTS is keyed by every TransformKind, so a kind added to the union without a doc
+		// mention fails here rather than shipping undocumented.
+		for (const kind of Object.keys(MIN_POINTS)) expect(DOC).toContain(kind);
 	});
 
 	test("the worked example still produces what the doc says it does", () => {

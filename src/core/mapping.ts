@@ -1,10 +1,12 @@
 /**
- * The three transform models, as pure 2D-to-2D fitters.
+ * The transform models, as pure 2D-to-2D fitters.
  *
- * Nothing here knows which side is the world and which is the image: a fitter takes interleaved
- * source pairs and interleaved destination pairs and returns a mapping between them. That is what
- * makes the reverse fit free — fit.ts simply calls the same fitter with the arguments swapped —
- * and it is why there is no latitude/longitude axis convention anywhere in this file.
+ * The three plane models do not know which side is the world and which is the image: a fitter
+ * takes interleaved source pairs and interleaved destination pairs and returns a mapping between
+ * them. That is what makes the reverse fit free — fit.ts simply calls the same fitter with the
+ * arguments swapped. The one exception is a projected model (`mercator`), which must project the
+ * world side and nothing else, so `fitMapping` takes a `direction` naming which argument that is;
+ * the [lat, lng] order it relies on is the kernel-wide convention in types.ts.
  *
  * CONDITIONING. Raw inputs are badly scaled for a least-squares fit: longitude runs to 180 while
  * pixels run to several thousand, and an order-2 polynomial squares both. Every fitter normalises
@@ -14,6 +16,7 @@
  */
 import { FitError, InvalidInputError, SingularMatrixError } from "./errors";
 import { leastSquares, solve } from "./linalg";
+import { MERCATOR, type Projection } from "./projection";
 import { MIN_POINTS, type Mapping, type TransformKind, type TransformOptions } from "./types";
 
 export { FitError } from "./errors";
@@ -295,20 +298,76 @@ function fitTps(src: Float64Array, dst: Float64Array, lambda: number): TpsMappin
 	return new TpsMapping(n, nodes, coeffs, target, Ainv, lambda, srcN, dstN, makeApply(srcN, dstN, evaluate));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Affine in a projected plane.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * An affine fit between projected world coordinates and pixels, wrapped so callers still speak
+ * raw [lat, lng]. This is the ONE place in this file that has to know which side is the world,
+ * because a projection only applies to it; `direction` says which argument that is.
+ *
+ * `checkInputs` runs on the RAW arrays first, so a non-finite coordinate is reported as the
+ * caller's input rather than as a projected value the caller never saw.
+ */
+function fitProjected(
+	src: Float64Array,
+	dst: Float64Array,
+	kind: "mercator",
+	projection: Projection,
+	direction: "forward" | "reverse" | undefined,
+): Mapping {
+	// No default: a silent "forward" on a reverse fit would project the pixel side and produce a
+	// plausible-looking wrong map, so a caller must say which argument is the world.
+	if (direction === undefined) throw new InvalidInputError("mercator needs a fit direction");
+	const n = checkInputs(src, dst, kind);
+	if (direction === "forward") {
+		const inner = fitPolynomial(projection.forward(src), dst, "affine");
+		return {
+			kind,
+			pointCount: n,
+			// One scratch array per batch, not per point: the projection allocates once.
+			apply: (s, d) => inner.apply(projection.forward(s), d),
+		};
+	}
+	const inner = fitPolynomial(src, projection.forward(dst), "affine");
+	return {
+		kind,
+		pointCount: n,
+		apply: (s, d) => {
+			inner.apply(s, d);
+			// Only the pairs this batch wrote: `dst` may be longer than `src`.
+			projection.inverse(d.subarray(0, s.length));
+		},
+	};
+}
+
 /**
  * Fit a mapping from interleaved source pairs to interleaved destination pairs.
  *
  * The default branch is not dead code. TypeScript guarantees nothing about a `kind` that arrived
  * from note frontmatter, and without it an unrecognised model returned a Fit whose `forward` and
  * `reverse` were both `undefined` — a shape that only fails much later, somewhere unrelated.
+ *
+ * `direction` matters only to a projected model, which must know which side holds [lat, lng]:
+ * "forward" is world to pixel, "reverse" pixel to world. The three plane models ignore it, which
+ * is why the reverse fit is still the same call with the arguments swapped. A mercator fit
+ * REQUIRES it and throws without one; the other models ignore it.
  */
-export function fitMapping(src: Float64Array, dst: Float64Array, opts: TransformOptions): Mapping {
+export function fitMapping(
+	src: Float64Array,
+	dst: Float64Array,
+	opts: TransformOptions,
+	direction?: "forward" | "reverse",
+): Mapping {
 	switch (opts.kind) {
 		case "affine":
 		case "polynomial2":
 			return fitPolynomial(src, dst, opts.kind);
 		case "tps":
 			return fitTps(src, dst, opts.lambda ?? 0);
+		case "mercator":
+			return fitProjected(src, dst, opts.kind, MERCATOR, direction);
 		default: {
 			const bad: never = opts.kind;
 			throw new InvalidInputError(`unknown transform model: ${JSON.stringify(bad)}`);

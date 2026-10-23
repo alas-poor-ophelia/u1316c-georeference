@@ -75,7 +75,10 @@ export function trust(fit: FitInfo, recommended?: number): Trust {
 		notes.push(COPY.spreadNote);
 	}
 
-	const parts = [short && recommended !== undefined ? `${count} ${COPY.recommendedSuffix(recommended)}` : count, `RMS ${d.affineRms.toFixed(1)} px`];
+	// A Mercator fit's residuals live in the projected plane, so its RMS is not comparable with the
+	// raw-plane figure the other models show; say which plane this one is.
+	const rms = `RMS ${d.affineRms.toFixed(1)} px${fit.model === "mercator" ? ` ${COPY.report.planeSuffix}` : ""}`;
+	const parts = [short && recommended !== undefined ? `${count} ${COPY.recommendedSuffix(recommended)}` : count, rms];
 	if (named !== null && d.affine.length > 1) parts.push(`worst ${named.label} ${named.error.toFixed(1)} px`);
 	// ALWAYS SHOW THE LEADING CAVEAT, not a bare count. This used to collapse to "2 caveats" the
 	// moment a second one appeared, which is the worst possible behaviour: the caveats that fire
