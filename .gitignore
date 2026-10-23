@@ -36,3 +36,6 @@ test/live/screenshots/
 test/live/geb-live/britain-5c/
 test/live/geb-live/uk-relief/
 test/user/
+
+# Maintainer-facing plan for the projection work; same rule as SCOPE.md.
+PLAN-projection.md
