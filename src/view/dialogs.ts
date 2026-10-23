@@ -103,6 +103,8 @@ export class ModelsModal extends Modal {
 		app: App,
 		/** The names the model select shows, so the guide and the select cannot disagree. */
 		private readonly models: readonly { readonly kind: TransformKind; readonly name: string }[],
+		/** The reference folder from the settings, named in the closing hint. */
+		private readonly referenceFolder: string,
 	) {
 		super(app);
 	}
@@ -117,7 +119,7 @@ export class ModelsModal extends Modal {
 		}
 		contentEl.createEl("p", { text: COPY.models.spread });
 		contentEl.createEl("p", { text: COPY.models.rms });
-		const hint = contentEl.createEl("p", { text: COPY.reference.folderHint });
+		const hint = contentEl.createEl("p", { text: COPY.reference.folderHint(this.referenceFolder) });
 		hint.createEl("br");
 		hint.createEl("code", { text: COPY.reference.download.command });
 	}

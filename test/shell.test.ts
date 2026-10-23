@@ -67,7 +67,7 @@ describe("opening", () => {
 
 	test("the status line carries the trust summary", () => {
 		opened();
-		expect(s.last.status).toContain(`tps, ${CLEAN.length} points`);
+		expect(s.last.status).toContain(`Spline, ${CLEAN.length} points`);
 		expect(s.last.status).toContain("RMS");
 	});
 });

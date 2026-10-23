@@ -32,6 +32,7 @@ import { ConfirmModal, discardPrompt, FitReportModal, ModelsModal } from "./dial
 import { PointModal } from "./modals";
 import {
 	MapShell,
+	MODELS,
 	PIN_HIT_RADIUS_CSS,
 	PIN_HIT_RADIUS_TOUCH_CSS,
 	type CreateSource,
@@ -43,13 +44,23 @@ import {
 
 export const VIEW_TYPE = "geb-georef";
 
+/**
+ * The settings the view reads. Declared here, not imported from the plugin layer, because the
+ * view consumes Geb only through the public API; the plugin's `GebSettings` satisfies it.
+ */
+export interface ViewSettings {
+	readonly referenceFolder: string;
+	readonly showReferenceByDefault: boolean;
+	readonly defaultModel: TransformKind;
+}
+
 export interface GeorefViewState {
 	readonly georefId: string;
 	/** Present while the map has no note yet. */
 	readonly create?: CreateSource;
 	/** The in-progress edit, so a restart does not lose it. */
 	readonly draft?: Draft;
-	/** Whether the reference lines are drawn; absent means yes. */
+	/** Whether the reference lines are drawn; absent means the "show reference lines by default" setting. */
 	readonly referenceVisible?: boolean;
 }
 
@@ -69,13 +80,6 @@ const HULL_GAP = 4;
 /** Long enough to reach Undo after reading the notice, short enough not to linger. */
 const UNDO_NOTICE_MS = 8000;
 const EDIT_TIP = "Edit the control points";
-
-const MODELS: readonly { readonly kind: TransformKind; readonly name: string }[] = [
-	{ kind: "affine", name: "Affine" },
-	{ kind: "mercator", name: "Mercator (affine)" },
-	{ kind: "polynomial2", name: "Polynomial (2nd order)" },
-	{ kind: "tps", name: "Thin-plate spline" },
-];
 
 interface Painted {
 	src: string;
@@ -111,7 +115,12 @@ export class GeorefView extends ItemView implements Surface {
 	private editBtn: HTMLButtonElement | null = null;
 	private referenceBtn: HTMLButtonElement | null = null;
 	/** The reference toggle, kept here so the layout can save it and a new shell can start with it. */
-	private referenceVisible = true;
+	private referenceVisible: boolean;
+	/**
+	 * Whether this leaf's toggle has been chosen, here or in a layout it was restored from. Until
+	 * it has, the layout does not record it, so the setting keeps deciding for this map.
+	 */
+	private referenceTouched = false;
 	private editBar: HTMLElement | null = null;
 	private modelSelect: HTMLSelectElement | null = null;
 	private editPointBtn: HTMLButtonElement | null = null;
@@ -144,8 +153,11 @@ export class GeorefView extends ItemView implements Surface {
 		private readonly getApi: () => GebAPI | null,
 		// The same getter shape as the API's.
 		private readonly references: () => ReferenceSet,
+		// A getter for the same reason: a change in the settings tab reaches the next shell booted.
+		private readonly settings: () => ViewSettings,
 	) {
 		super(leaf);
+		this.referenceVisible = settings().showReferenceByDefault;
 		this.navigation = false;
 	}
 
@@ -169,7 +181,7 @@ export class GeorefView extends ItemView implements Surface {
 		if (this.create !== null) state.create = this.create;
 		const draft = this.shell?.draft ?? this.restoredDraft;
 		if (draft !== null) state.draft = draft;
-		state.referenceVisible = this.referenceVisible;
+		if (this.referenceTouched) state.referenceVisible = this.referenceVisible;
 		return state;
 	}
 
@@ -186,8 +198,9 @@ export class GeorefView extends ItemView implements Surface {
 		const s = state as Partial<GeorefViewState> | null | undefined;
 		const id = typeof s?.georefId === "string" ? s.georefId : "";
 		const create = readCreate(s?.create);
-		// Anything but an explicit false means shown.
-		this.referenceVisible = s?.referenceVisible !== false;
+		// A flag the layout recorded wins; without one the setting decides.
+		this.referenceTouched = typeof s?.referenceVisible === "boolean";
+		this.referenceVisible = typeof s?.referenceVisible === "boolean" ? s.referenceVisible : this.settings().showReferenceByDefault;
 		const same = id === this.georefId && create?.imagePath === this.create?.imagePath && create?.notePath === this.create?.notePath;
 		if (!same) {
 			this.georefId = id;
@@ -266,6 +279,7 @@ export class GeorefView extends ItemView implements Surface {
 			...(draft === null ? {} : { draft }),
 			references: this.references,
 			referenceVisible: this.referenceVisible,
+			defaultModel: this.settings().defaultModel,
 		});
 		this.shell.open();
 	}
@@ -290,7 +304,13 @@ export class GeorefView extends ItemView implements Surface {
 		this.referenceBtn = button(toolbar, COPY.reference.button, COPY.reference.tip, () => {
 			this.shell?.setReferenceVisible(!(this.lastFrame?.referenceVisible ?? this.referenceVisible));
 		});
-		this.editBtn = button(toolbar, "Edit", EDIT_TIP, () => this.shell?.beginEdit());
+		// A TOGGLE, not a one-way door. It stays visible and pressed while editing, and choosing it
+		// again leaves edit mode (asking first when there is work to lose). Before this, the only
+		// way out was Discard at the far end of the edit bar, and the first user could not find it.
+		this.editBtn = button(toolbar, "Edit", EDIT_TIP, () => {
+			if (this.lastFrame?.edit) this.discard();
+			else this.shell?.beginEdit();
+		});
 
 		const bar = toolbar.createSpan({ cls: "geb-edit-bar" });
 		this.editBar = bar;
@@ -302,7 +322,7 @@ export class GeorefView extends ItemView implements Surface {
 		// here, next to the DOM it repaints. The cast is the file-menu-style escape for a custom event.
 		const workspace = this.app.workspace as unknown as { on(name: string, cb: () => void): EventRef };
 		this.registerEvent(workspace.on("geb:reference-changed", () => this.shell?.reloadReference()));
-		button(bar, COPY.models.button, COPY.models.tip, () => new ModelsModal(this.app, MODELS).open());
+		button(bar, COPY.models.button, COPY.models.tip, () => new ModelsModal(this.app, MODELS, this.settings().referenceFolder).open());
 		this.editPointBtn = button(bar, "Edit point…", "Change the selected point's coordinate", () => this.editSelected());
 		this.deletePointBtn = button(bar, "Delete point", "Remove the selected point", () => this.deleteSelected());
 		this.saveBtn = button(bar, "Save", "Write the control points to the georeference note", () => void this.shell?.save());
@@ -626,6 +646,7 @@ export class GeorefView extends ItemView implements Surface {
 		const viewportChanged = prev === null || prev.viewport !== frame.viewport;
 		// The toggle lives in the layout too; a flip is worth a save.
 		const visibilityChanged = this.referenceVisible !== frame.referenceVisible;
+		if (visibilityChanged) this.referenceTouched = true;
 		this.referenceVisible = frame.referenceVisible;
 		this.painted = {
 			src: frame.image.src,
@@ -769,14 +790,21 @@ export class GeorefView extends ItemView implements Surface {
 			this.referenceBtn.setAttribute("aria-label", tip);
 			this.referenceBtn.setAttribute("aria-pressed", String(frame.referenceVisible));
 		}
-		this.editBtn?.setAttribute("title", frame.pending ? COPY.tips.editPending : EDIT_TIP);
+		if (this.editBtn !== null) {
+			const tip = edit === null ? (frame.pending ? COPY.tips.editPending : EDIT_TIP) : edit.dirty ? COPY.tips.editStopDirty : COPY.tips.editStop;
+			this.editBtn.setAttribute("title", tip);
+			this.editBtn.setAttribute("aria-label", tip);
+			this.editBtn.classList.toggle("is-active", edit !== null);
+			this.editBtn.setAttribute("aria-pressed", String(edit !== null));
+			this.editBtn.disabled = edit === null ? !frame.canEdit : edit.saving;
+			// A new map has no saved view to return to, so there is no edit mode to leave: the
+			// toggle is withheld until the first save rather than offered with a tip it cannot keep.
+			this.editBtn.toggle(!frame.creating);
+		}
 		if (edit === null) {
 			this.editBar?.hide();
-			this.editBtn?.show();
-			if (this.editBtn !== null) this.editBtn.disabled = !frame.canEdit;
 			return;
 		}
-		this.editBtn?.hide();
 		this.editBar?.show();
 		if (this.modelSelect !== null) this.modelSelect.value = edit.model;
 		if (this.modelSelect !== null) this.modelSelect.disabled = edit.saving;

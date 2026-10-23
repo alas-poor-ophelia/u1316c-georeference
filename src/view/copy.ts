@@ -12,30 +12,35 @@
  * a dash inside itself.
  */
 
+import type { TransformKind } from "../api/types";
+
 export const COPY = {
 	/** Over the map while a new draft has no points. */
-	emptyBanner: "Click or tap the map to place your first control point. Nothing is saved until you press Save.",
+	emptyBanner: "Tap or click the map to place your first control point. Nothing is saved until you select Save.",
 
 	/** Status line while the draft has fewer points than the model's minimum. */
 	belowMin: (n: number, min: number): string =>
-		n === 0 ? `0 of ${min} points placed · click the map to add the first` : `${n} of ${min} points placed · add another to reach ${min}`,
+		// At zero the banner over the map already says what to do; the status only counts.
+		n === 0 ? `0 of ${min} points` : `${n} of ${min} points, add another to reach ${min}`,
 	/** Appended to the point count while below the recommended count. */
 	recommendedSuffix: (rec: number): string => `(${rec} recommended)`,
 	/** Polynomial at six or seven points. */
-	barelyDetermined: (n: number, rec: number): string => `Barely determined at ${n} points. ${rec} or more will steady this fit.`,
+	barelyDetermined: (n: number, rec: number): string => `Barely determined at ${n} points, ${rec} or more steadies the fit`,
 	/** Shown with any fit, next to the dashed hull. */
-	spreadNote: "The dashed outline is the trusted area. Pins outside it are extrapolated.",
+	spreadNote: "The dashed outline is the trusted area. Notes outside it are extrapolated.",
 
 	models: {
 		title: "Transform models",
-		affine: "A flat stretch, rotate and shear. Needs 3 points, and 4 is better. It cannot bend, so it suits a handful of points or a map drawn to a consistent projection.",
-		polynomial2: "Adds gentle curvature for maps that warp smoothly. Needs 6 points and is barely determined at 6 or 7, so 8 or more are recommended.",
-		tps: "Bends to pass exactly through every point. Needs 3 points, where it matches affine, and shines from about 6 well-spread points on scanned or hand-drawn maps. The default for a new map.",
-		mercator: "An affine fitted after projecting coordinates as web map tiles and modern atlases are drawn. Needs 3 points, and 4 is better. Exact on a Mercator base, where a flat affine drifts. Worse than the spline elsewhere. Its RMS is measured in the projected plane, and control points above 85 degrees of latitude are refused.",
-		spread: "Spread matters more than count: four points spanning the map beat eight along one edge. The dashed outline joins the outermost points. Inside it the fit is trusted, outside it error grows with distance. In one test, four points along a single wall scored 0.3 px RMS yet placed a distant town 20 px off.",
-		rms: "The RMS shows how closely an affine fit matches your points, in image pixels, and it is shown for every model on purpose: a spline passes exactly through its points and would read zero even with a mistyped coordinate. A low RMS means your points agree with each other, not that the map is right far from them.",
+		affine: "Stretches, rotates, and shears the image. It cannot bend. Needs 3 points, and 4 is better. Suits a few points or a map drawn in a consistent projection.",
+		polynomial2: "Adds gentle curvature for maps that warp smoothly. Needs 6 points. It is barely determined at 6 or 7, so use 8 or more.",
+		tps: "Bends to pass exactly through every point. Needs 3 points, where it matches affine. It works well from about 6 well-spread points on scanned or hand-drawn maps.",
+		mercator: "An affine fitted after projecting coordinates the way web map tiles and modern atlases draw them. Needs 3 points, and 4 is better. Exact on a Mercator base, where a flat affine drifts. Worse than the spline elsewhere. Its RMS is measured in the projected plane. Control points above 85 degrees of latitude are refused.",
+		spread: "Spread matters more than count. Four points spanning the map beat eight along one edge. The dashed outline joins the outermost points. Inside it the fit is trusted. Outside it error grows with distance. In one test, four points along a single wall scored 0.3 px RMS yet placed a distant town 20 px off.",
+		rms: "The RMS shows how closely an affine fit matches your points, in image pixels. It is shown for every model on purpose. A spline passes exactly through its points and would read zero even with a mistyped coordinate. A low RMS means your points agree with each other, not that the map is right far from them.",
 		button: "Which model?",
 		tip: "Compare the models and learn about spread and RMS",
+		/** Status-line names: short and dash-free, because fragments share one line and may not carry a dash. */
+		short: { affine: "Affine", mercator: "Mercator", polynomial2: "Polynomial", tps: "Spline" } as Readonly<Record<TransformKind, string>>,
 	},
 
 	report: {
@@ -76,12 +81,12 @@ export const COPY = {
 		latHint: "Decimal (51.5074 or 51,5074) or DMS (51°30'26″N), with a sign or N/S. Paste a pair to fill both fields.",
 		lngHint: "Decimal (-0.1278 or -0,1278) or DMS (0°7'39″W), with a sign or E/W.",
 		unreadable: "Cannot read this coordinate. Try 51.5074, 51,5074 or 51°30'26″N, with a sign or an N/S/E/W letter, not both.",
-		wrongAxis: "Wrong hemisphere letter: latitude takes N or S, longitude E or W.",
+		wrongAxis: "Wrong hemisphere letter. Latitude takes N or S, longitude E or W.",
 		pairFilled: "Filled latitude and longitude from the pasted pair.",
 	},
 
 	create: {
-		notePathHint: "The georeference note is created here on your first Save. The image stays where it is.",
+		notePathHint: "The georeference note is created here the first time you save. The image stays where it is.",
 		idHint: "How Geb and other plugins refer to this map. You can change it later under geb-id in the note's frontmatter.",
 	},
 
@@ -91,19 +96,46 @@ export const COPY = {
 	reference: {
 		button: "Reference",
 		tip: "Toggle reference lines over the map",
-		none: "No reference lines cover this map, or the map is not of Earth",
+		none: "No reference lines cover this map, or it is not a map of Earth",
 		problems: "Unreadable reference files",
-		folderHint: "Put your own GeoJSON files in the vault folder Geb/reference to draw them as reference lines.",
+		folderHint: (folder: string): string => `Put your own GeoJSON files in the vault folder ${folder} to draw them as reference lines.`,
 		download: {
 			command: "Download Natural Earth coastline",
 			title: "Download Natural Earth coastline?",
-			body: "This downloads the Natural Earth 10 metre coastline from the project's mirror on GitHub. The file is public domain and about 10 MB. It is saved as Geb/reference/coastline-10m.geojson in your vault, and you can delete it at any time.",
+			body: (path: string): string =>
+				`Downloads the Natural Earth 10 meter coastline from the project's mirror on GitHub. The file is public domain and about 10 MB. It is saved as ${path} in your vault. You can delete it at any time.`,
 			confirm: "Download",
 			cancel: "Cancel",
 			done: (path: string): string => `Coastline reference saved to ${path}`,
 			failed: (reason: string): string => `Could not download the coastline: ${reason}`,
 			offline: "No network connection. Try again when you are online.",
-			exists: "The coastline file already exists in Geb/reference",
+			exists: (folder: string): string => `The coastline file already exists in ${folder}`,
+		},
+	},
+
+	/** The settings tab: each row's name and description, in the order the tab shows them. */
+	settings: {
+		referenceFolder: {
+			name: "Reference folder",
+			desc: "GeoJSON files in this vault folder are drawn as reference lines over every map. The coastline download is saved here too.",
+		},
+		coastline: {
+			name: "Natural Earth coastline",
+			desc: "A public domain coastline, about 10 MB, saved in the reference folder. Shows whether a fit follows the shore.",
+			download: "Download",
+			downloaded: "Downloaded",
+		},
+		showReference: {
+			name: "Show reference lines by default",
+			desc: "Draw reference lines when a map opens. The Reference button still toggles them per map.",
+		},
+		defaultModel: {
+			name: "Default transform model",
+			desc: "The model a new map starts with. You can change it per map while editing.",
+		},
+		newNoteFolder: {
+			name: "Folder for new georeference notes",
+			desc: "Where the georeference note goes when you georeference an image. Leave empty to create it beside the image.",
 		},
 	},
 
@@ -112,7 +144,7 @@ export const COPY = {
 		ribbon: "Open maps",
 		command: "Open maps",
 		placeholder: "Search maps…",
-		none: 'No maps yet. Right-click an image and choose "Georeference this image" to create one.',
+		none: 'No maps yet. Open an image\'s context menu and choose "Georeference this image" to create one.',
 		note: "Open map",
 		image: "Georeference this image or open its map",
 	},
@@ -121,5 +153,8 @@ export const COPY = {
 		saveNeed: (n: number): string => (n === 1 ? "Place one more point to save" : `Place ${n} more points to save`),
 		saveClean: "Nothing to save",
 		editPending: "Edit is available once Obsidian has indexed the saved note.",
+		/** The Edit button stays pressed while editing; choosing it again is the way out. */
+		editStop: "Stop editing",
+		editStopDirty: "Stop editing. You will be asked about unsaved changes.",
 	},
 } as const;

@@ -20,7 +20,10 @@
 
 .geb-toolbar {
 	display: flex;
-	gap: var(--size-4-2);
+	/* The edit bar needs about 950 px in one row. In a split pane the row used to run off the
+	   right edge with no scrollbar, taking Save and Discard with it, so the row wraps instead. */
+	flex-wrap: wrap;
+	gap: var(--size-4-1) var(--size-4-2);
 	align-items: center;
 	padding: var(--size-4-1) var(--size-4-2);
 	border-bottom: 1px solid var(--background-modifier-border);
@@ -31,17 +34,20 @@
 	cursor: pointer;
 }
 
-/* Details and the status line, pushed to the right-hand end together. */
+/* Details and the status line, together at the right-hand end of their row. The tail grows
+   from a ZERO base, so the length of the status never decides whether the toolbar wraps: with
+   a content base, a status that grew at the third point pushed the tail to a new row and the
+   whole map jumped under the user's next tap. It takes a row of its own only below the minimum. */
 .geb-toolbar-tail {
 	display: flex;
 	gap: var(--size-4-2);
 	align-items: center;
-	margin-left: auto;
-	min-width: 0;
+	justify-content: flex-end;
+	flex: 1 1 0;
+	min-width: 8em;
 }
 
 .geb-status {
-	margin-left: auto;
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
 	overflow: hidden;
@@ -280,9 +286,10 @@
 /* --- The control-point editor ------------------------------------------------------------- */
 
 .geb-edit-bar {
-	display: inline-flex;
-	gap: var(--size-4-2);
-	align-items: center;
+	/* Its controls are laid out as toolbar items in their own right, so a narrow pane wraps them
+	   one by one instead of carrying a 620 px block off the edge. `hide()` still sets an inline
+	   display of none on the span, which hides them all. */
+	display: contents;
 }
 
 /* A control point is a SQUARE so it cannot be mistaken for a round place pin. Positioned in

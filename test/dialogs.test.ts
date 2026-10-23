@@ -8,8 +8,9 @@ import { describe, expect, mock, test } from "bun:test";
 import { COPY } from "../src/view/copy";
 import { coordinate } from "../src/view/format";
 import type { FitReport, FitReportRow, FrameEdit } from "../src/view/shell";
+import { OBSIDIAN_STUB } from "./obsidian-stub";
 
-void mock.module("obsidian", () => ({ Modal: class {} }));
+void mock.module("obsidian", () => OBSIDIAN_STUB);
 const { discardPrompt, reportRowCells, reportSummary } = await import("../src/view/dialogs");
 
 const ROW: FitReportRow = { label: "York", px: 10.4, py: 20.6, lat: 53.96, lng: -1.08, error: 1.234, loo: 2.26, hull: false };

@@ -515,6 +515,18 @@ describe("editing a saved map", () => {
 		expect(after.lambda).toBe(0.5);
 	});
 
+	test("leaving edit mode with nothing changed returns to the saved view without a write", async () => {
+		const shell = openShell(c, s);
+		shell.beginEdit();
+		expect(s.last.edit?.dirty).toBe(false);
+		shell.discardEdit();
+		expect(s.last.edit).toBeNull();
+		expect(s.last.canEdit).toBe(true);
+		expect(s.last.status).toBe(summary(c.api.getFit(ID)));
+		expect(v.writes).toEqual([]);
+		await settled();
+	});
+
 	test("discard drops the changes, writes nothing, and the saved fit is untouched", async () => {
 		const shell = openShell(c, s);
 		shell.beginEdit();
@@ -619,8 +631,8 @@ describe("guidance while placing", () => {
 	test("a fittable spline short of the recommended count says so, and a collinear draft still says why it fails", async () => {
 		const shell = await creating();
 		for (const p of CLEAN.slice(0, 3)) shell.placePoint(p);
-		expect(s.last.status.startsWith(`tps, 3 points ${COPY.recommendedSuffix(c.api.recommendedPoints.tps)}`)).toBe(true);
-		expect(s.last.status.startsWith("tps, 3 points (8 recommended)")).toBe(true);
+		expect(s.last.status.startsWith(`Spline, 3 points ${COPY.recommendedSuffix(c.api.recommendedPoints.tps)}`)).toBe(true);
+		expect(s.last.status.startsWith("Spline, 3 points (8 recommended)")).toBe(true);
 		shell.discardEdit();
 		for (const p of COLLINEAR) shell.placePoint(p);
 		const preview = c.api.previewFit(COLLINEAR, { kind: DEFAULT_MODEL });

@@ -445,7 +445,7 @@ const CHECKS: readonly Check[] = [
 		name: "the Mercator model can be chosen, saved and reloaded",
 		run: () =>
 			inWindow(
-				async ({ id, notePath }: { id: string; notePath: string }) => {
+				async ({ id, notePath, short }: { id: string; notePath: string; short: Record<string, string> }) => {
 					// Only the model round trip is asserted: the fixture is equirectangular, so a Mercator
 					// fit's RMS here says nothing about the model, and the checks below were written against
 					// the default model, which is restored at the end.
@@ -460,7 +460,7 @@ const CHECKS: readonly Check[] = [
 						if (select === null) throw new Error("no model select in the edit bar");
 						select.value = kind;
 						select.dispatchEvent(new Event("change", { bubbles: true }));
-						if (unsavedFirst) await until(`the status to name ${kind}`, () => (q(".geb-status")?.textContent ?? "").startsWith(`${kind}, 4 points`));
+						if (unsavedFirst) await until(`the status to name ${kind}`, () => (q(".geb-status")?.textContent ?? "").startsWith(`${short[kind]}, 4 points`));
 						buttonNamed("Save", ".geb-edit-bar")!.click();
 						await until("the save to land", () => !/unsaved/.test(q(".geb-status")?.textContent ?? "") && api().getFit(id).model === kind, 15_000);
 						await until("the edit bar to hide", () => q(".geb-edit-bar")!.style.display === "none");
@@ -485,7 +485,7 @@ const CHECKS: readonly Check[] = [
 					}
 					return `stored model ${String(stored)}, status "${status}"; restored to ${api().getFit(id).model}`;
 				},
-				{ id: GEOREF_ID, notePath: NOTE_PATH },
+				{ id: GEOREF_ID, notePath: NOTE_PATH, short: COPY.models.short },
 			),
 	},
 	{
@@ -604,6 +604,47 @@ const CHECKS: readonly Check[] = [
 			),
 	},
 	{
+		// Measured before the fix in the Guildmaster's own window: at 622 px the edit bar ran off the
+		// right edge of a non-wrapping toolbar with no scrollbar, taking Save and Discard with it,
+		// so the only way out of Edit was closing the leaf. The pane is narrowed by an inline width
+		// on the view's content element and restored whatever happens.
+		name: "in a 600 px pane the toolbar wraps so Save and Discard stay under the pointer, and Edit toggles a clean draft off",
+		run: () =>
+			inWindow(async ({ stop }: { stop: string }) => {
+				const content = gebLeaf()!.view.containerEl.querySelector<HTMLElement>(".view-content");
+				if (content === null) throw new Error("no .view-content in the leaf");
+				const prior = content.style.width;
+				try {
+					content.setCssStyles({ width: "600px" });
+					await until("Edit to be offered", () => !buttonNamed("Edit", ".geb-toolbar")!.disabled, 15_000);
+					const edit = buttonNamed("Edit", ".geb-toolbar")!;
+					edit.click();
+					await until("the edit bar", () => q(".geb-edit-bar")!.style.display !== "none");
+					if (edit.style.display === "none" || edit.getAttribute("aria-pressed") !== "true") throw new Error("Edit is not shown pressed while editing");
+					if (edit.getAttribute("title") !== stop) throw new Error(`Edit's tip while editing is "${edit.getAttribute("title")}"`);
+					const pane = content.getBoundingClientRect();
+					const reached: string[] = [];
+					for (const name of ["Save", "Discard"]) {
+						const b = buttonNamed(name, ".geb-edit-bar")!;
+						const r = b.getBoundingClientRect();
+						const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+						if (r.right > pane.right + 0.5 || !(hit === b || b.contains(hit))) {
+							throw new Error(`${name} is clipped in a 600 px pane: its right edge is ${(r.right - pane.left).toFixed(0)} px into a ${pane.width.toFixed(0)} px pane`);
+						}
+						reached.push(`${name} at ${(r.left - pane.left).toFixed(0)},${(r.top - pane.top).toFixed(0)}`);
+					}
+					const rows = new Set(qa(".geb-toolbar button").filter((b) => b.style.display !== "none").map((b) => Math.round(b.getBoundingClientRect().top))).size;
+					edit.click();
+					await until("the edit bar to hide", () => q(".geb-edit-bar")!.style.display === "none");
+					if (q(".modal-container") !== null) throw new Error("a clean draft asked for confirmation on the way out");
+					if (edit.getAttribute("aria-pressed") !== "false") throw new Error("Edit still reads pressed after leaving");
+					return `toolbar on ${rows} row(s); ${reached.join(", ")}; Edit toggled off without a prompt`;
+				} finally {
+					content.setCssStyles({ width: prior });
+				}
+			}, { stop: COPY.tips.editStop }),
+	},
+	{
 		name: "Edit, drag a point with the mouse, Save: the write lands and the map reloads from the vault",
 		run: () =>
 			inWindow(
@@ -711,6 +752,76 @@ const CHECKS: readonly Check[] = [
 				{ id: GEOREF_ID },
 			);
 		},
+	},
+	{
+		// The declarative text control reports every keystroke and never re-reads the stored value
+		// (measured in this window), so this check types through the real input and watches the
+		// field, the setting and the coastline row together. The vault's setting is restored
+		// whatever happens; the settings dialog is document-level, like the other modals.
+		name: "the settings tab: an emptied reference folder snaps back on blur, and a changed folder re-renders the coastline row",
+		run: () =>
+			inWindow(
+				async ({ folder, downloaded, download, rows }: { folder: string; downloaded: string; download: string; rows: readonly string[] }) => {
+					const settingApp = app as unknown as { setting: { open(): void; close(): void; openTabById(id: string): void; activeTab: { containerEl: HTMLElement } | null } };
+					const plugin = (app as unknown as { plugins: { plugins: Record<string, { settings: { referenceFolder: string } }> } }).plugins.plugins.geb!;
+					if (plugin.settings.referenceFolder !== folder) throw new Error(`the fixture's reference folder is ${plugin.settings.referenceFolder}, not ${folder}`);
+					const tab = (): HTMLElement => {
+						const el = settingApp.setting.activeTab?.containerEl;
+						if (el === undefined) throw new Error("no active settings tab");
+						return el;
+					};
+					const row = (name: string): HTMLElement => {
+						const it = Array.from(tab().querySelectorAll<HTMLElement>(".setting-item")).find((el) => el.querySelector(".setting-item-name")?.textContent === name);
+						if (it === undefined) throw new Error(`no settings row named "${name}"`);
+						return it;
+					};
+					const input = (): HTMLInputElement => {
+						const el = row(rows[0]!).querySelector<HTMLInputElement>("input[type=text]");
+						if (el === null) throw new Error("the reference folder row has no text input");
+						return el;
+					};
+					const coastButton = (): HTMLButtonElement => {
+						const el = row(rows[1]!).querySelector<HTMLButtonElement>("button");
+						if (el === null) throw new Error("the coastline row has no button");
+						return el;
+					};
+					const type = (value: string): void => {
+						input().value = value;
+						input().dispatchEvent(new Event("input", { bubbles: true }));
+					};
+					settingApp.setting.open();
+					settingApp.setting.openTabById("geb");
+					try {
+						await until("the settings rows", () => tab().querySelectorAll(".setting-item").length >= rows.length);
+						const names = Array.from(tab().querySelectorAll(".setting-item-name")).map((n) => n.textContent ?? "");
+						for (const r of rows) if (!names.includes(r)) throw new Error(`no row named "${r}" among ${names.join(" | ")}`);
+						if (coastButton().textContent !== downloaded || !coastButton().disabled) throw new Error(`the coastline row reads "${coastButton().textContent}" over the folder that holds the file`);
+						type("");
+						await until("the emptied field to keep the default stored", () => plugin.settings.referenceFolder === folder && input().value === "");
+						input().dispatchEvent(new Event("blur"));
+						await until("the field to snap back to the stored folder", () => input().value === folder);
+						type("Geb/elsewhere");
+						await until("the setting to take the new folder", () => plugin.settings.referenceFolder === "Geb/elsewhere");
+						input().dispatchEvent(new Event("blur"));
+						await until("the coastline row to speak for the new folder", () => coastButton().textContent === download && !coastButton().disabled);
+						return `${names.length} rows; emptied field snapped back to ${folder}; coastline row reads ${download} for Geb/elsewhere`;
+					} finally {
+						try {
+							type(folder);
+							input().dispatchEvent(new Event("blur"));
+						} finally {
+							settingApp.setting.close();
+						}
+						await until("the reference folder to be restored", () => plugin.settings.referenceFolder === folder);
+					}
+				},
+				{
+					folder: "Geb/reference",
+					downloaded: COPY.settings.coastline.downloaded,
+					download: COPY.settings.coastline.download,
+					rows: [COPY.settings.referenceFolder.name, COPY.settings.coastline.name, COPY.settings.showReference.name, COPY.settings.defaultModel.name, COPY.settings.newNoteFolder.name],
+				},
+			),
 	},
 	{
 		name: "nothing is left open and the app logged no error from geb",

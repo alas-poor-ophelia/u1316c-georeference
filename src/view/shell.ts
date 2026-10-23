@@ -275,6 +275,16 @@ const LINE_SAMPLES = 32;
 const REGION_SAMPLES = 4;
 /** A new map starts as a spline: a hand-drawn map has warp, and at three points a spline IS affine. */
 export const DEFAULT_MODEL: TransformKind = "tps";
+/**
+ * Every model a map can use, with the name the model select, the model guide and the settings
+ * tab show. Here rather than in view.ts so the settings tab can import it without the view.
+ */
+export const MODELS: readonly { readonly kind: TransformKind; readonly name: string }[] = [
+	{ kind: "affine", name: "Affine" },
+	{ kind: "mercator", name: "Mercator (affine)" },
+	{ kind: "polynomial2", name: "Polynomial (2nd order)" },
+	{ kind: "tps", name: "Thin-plate spline" },
+];
 const DEFAULT_CRS = "earth";
 /**
  * Reference vertices closer than this to the last one kept are dropped, in image pixels. At the
@@ -317,7 +327,7 @@ export const MESSAGES = {
 	indexing: "Waiting for Obsidian to finish indexing the vault.",
 	unloaded: "Geb has been unloaded. Reopen this view once it is enabled again.",
 	noImage: (id: string): string => `The image for "${id}" does not resolve. Check the link in its georeference note.`,
-	noGeoref: (id: string): string => `No georeference with id "${id}" is loaded.`,
+	noGeoref: (id: string): string => `No map with id "${id}" is loaded.`,
 	badImage: (path: string): string => `The image at "${path}" could not be loaded.`,
 } as const;
 
@@ -410,6 +420,8 @@ export class MapShell {
 
 	private unsubscribes: (() => void)[] = [];
 	private closed = false;
+	/** The model a new map starts with; from the settings, through the constructor. */
+	private readonly defaultModel: TransformKind;
 
 	constructor(
 		private readonly api: GebAPI,
@@ -427,15 +439,18 @@ export class MapShell {
 			 * planned on the way to being hidden. `setReferenceVisible` changes it afterwards.
 			 */
 			readonly referenceVisible?: boolean;
+			/** The model a NEW map starts with, and a saved map with no fit yet. Default `DEFAULT_MODEL`. */
+			readonly defaultModel?: TransformKind;
 		} = {},
 	) {
+		this.defaultModel = options.defaultModel ?? DEFAULT_MODEL;
 		this.references = options.references ?? ((): ReferenceSet => NO_REFERENCE_SET);
 		this.referenceVisible = options.referenceVisible ?? true;
 		this.create = options.create ?? null;
 		// A map with no note is only ever here to be edited, so it starts editing; a restored
 		// draft resumes whatever was in progress, note or no note.
 		if (options.draft !== undefined) this.setEdit(options.draft.model, options.draft.points, null);
-		else if (this.create !== null) this.setEdit(DEFAULT_MODEL, [], null);
+		else if (this.create !== null) this.setEdit(this.defaultModel, [], null);
 	}
 
 	// --- lifecycle -------------------------------------------------------------------------
@@ -841,7 +856,8 @@ export class MapShell {
 	 */
 	beginEdit(): void {
 		if (this.image === null || this.edit !== null || this.pending !== null || this.saving) return;
-		this.setEdit(this.fit?.model ?? DEFAULT_MODEL, this.fit?.points ?? [], null);
+		// A saved fit keeps its own model; only a map with no fit at all takes the default.
+		this.setEdit(this.fit?.model ?? this.defaultModel, this.fit?.points ?? [], null);
 	}
 
 	/**

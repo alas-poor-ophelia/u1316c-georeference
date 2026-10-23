@@ -1,4 +1,4 @@
-import { debounce, FileView, MarkdownView, normalizePath, Notice, Plugin, requestUrl, TFile, type Debouncer, type EventRef, type View } from "obsidian";
+import { debounce, FileView, MarkdownView, normalizePath, Notice, Plugin, requestUrl, TFile, TFolder, type Debouncer, type EventRef, type View } from "obsidian";
 import { ApiController } from "../api/controller";
 import type { GebAPI, ReferenceSet } from "../api/types";
 import { reconcile, type ReconcileOutcome } from "../persist/reconcile";
@@ -11,12 +11,12 @@ import { CreateGeorefModal, MapPicker, type CreateChoice } from "../view/modals"
 import type { CreateSource } from "../view/shell";
 import { GeorefView, VIEW_TYPE } from "../view/view";
 import { EMPTY_REFERENCES, References } from "./references";
+import { coastlinePath, DEFAULT_SETTINGS, defaultNotePath, GebSettingTab, matchFolderCase, readSettings, type GebSettings, type SettingsHost } from "./settings";
 import { IMAGE_EXTENSIONS, ObsidianVault } from "./vault-adapter";
 
 // Natural Earth 10 m coastline, public domain, from the project's GitHub mirror.
+// It is saved into the reference folder from the settings, as `coastlinePath` names it.
 const COASTLINE_URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_coastline.geojson";
-const COASTLINE_FOLDER = "Geb/reference";
-const COASTLINE_PATH = `${COASTLINE_FOLDER}/coastline-10m.geojson`;
 
 /**
  * The one place the plugin's display name lives. Wadjet scatters its display name
@@ -28,7 +28,9 @@ function isImage(file: TFile): boolean {
 	return IMAGE_EXTENSIONS.has(file.extension.toLowerCase());
 }
 
-export default class GebPlugin extends Plugin {
+export default class GebPlugin extends Plugin implements SettingsHost {
+	/** Read from data.json first thing in `onload`; everything after reads it through a getter. */
+	override settings: GebSettings = DEFAULT_SETTINGS;
 	private vault: VaultPort | null = null;
 	/** Checked between notes so an in-flight handler stops writing once the plugin is gone. */
 	private alive = false;
@@ -42,7 +44,7 @@ export default class GebPlugin extends Plugin {
 	 * long enough to coalesce a burst and short enough that a single edit feels immediate.
 	 */
 	private flushSoon: Debouncer<[], void> | null = null;
-	/** The reference lines read from the vault's Geb/reference folder; null before load and after unload. */
+	/** The reference lines read from the settings' reference folder; null before load and after unload. */
 	private references: References | null = null;
 
 	/**
@@ -54,7 +56,20 @@ export default class GebPlugin extends Plugin {
 	 */
 	api: GebAPI | null = null;
 
-	override onload(): void {
+	/** Set by `onunload`; `onload` checks it after its one await, so a plugin disabled mid-load builds nothing. */
+	private disposed = false;
+
+	override async onload(): Promise<void> {
+		// FIRST, before anything that reads a setting is built. A data.json that does not parse must
+		// not take the plugin down with it: the defaults stand in and the console says so.
+		let raw: unknown = null;
+		try {
+			raw = await this.loadData();
+		} catch (e) {
+			console.warn(`${DISPLAY_NAME}: the settings could not be read, using the defaults`, e);
+		}
+		if (this.disposed) return;
+		this.settings = readSettings(raw, this.app.vault.configDir);
 		this.vault = new ObsidianVault(this.app);
 		this.alive = true;
 		this.controller = new ApiController(this.vault, this.manifest.version);
@@ -65,16 +80,18 @@ export default class GebPlugin extends Plugin {
 		// would by re-reading `app.plugins.plugins.geb.api`. Passing the object would let the
 		// view keep a dead API alive past `geb:unload`.
 		const vaultAdapter = this.vault;
-		this.references = new References(this, (path) => vaultAdapter.readBinary(path));
+		this.references = new References(
+			this,
+			(path) => vaultAdapter.readBinary(path),
+			() => this.settings.referenceFolder,
+		);
 		const getReferences = (): ReferenceSet => this.references?.current() ?? EMPTY_REFERENCES;
-		this.registerView(VIEW_TYPE, (leaf) => new GeorefView(leaf, () => this.api, getReferences));
+		this.registerView(VIEW_TYPE, (leaf) => new GeorefView(leaf, () => this.api, getReferences, () => this.settings));
+		this.addSettingTab(new GebSettingTab(this.app, this));
 		this.addCommand({
 			id: "download-coastline",
 			name: COPY.reference.download.command,
-			callback: () => {
-				const d = COPY.reference.download;
-				new ConfirmModal(this.app, d.title, d.body, d.confirm, d.cancel, () => void this.downloadCoastline()).open();
-			},
+			callback: () => this.offerCoastlineDownload(),
 		});
 		this.addCommand({
 			id: "open-georef-view",
@@ -182,6 +199,7 @@ export default class GebPlugin extends Plugin {
 	 * is what a consumer needs instead of an empty answer from a dead plugin.
 	 */
 	override onunload(): void {
+		this.disposed = true;
 		this.alive = false;
 		// Cancelled before the controller goes, or a pending flush fires into a dead API.
 		this.flushSoon?.cancel();
@@ -195,17 +213,43 @@ export default class GebPlugin extends Plugin {
 		this.vault = null;
 	}
 
-	/** Fetch the coastline into the vault's reference folder. Only ever reached through the confirm modal. */
+	async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
+	}
+
+	referenceFolderChanged(): void {
+		this.references?.folderChanged();
+	}
+
+	/** The palette command and the settings tab's button: one confirmation, one download. */
+	offerCoastlineDownload(started?: (download: Promise<void>) => void): void {
+		const d = COPY.reference.download;
+		const path = coastlinePath(this.settings.referenceFolder);
+		new ConfirmModal(this.app, d.title, d.body(path), d.confirm, d.cancel, () => {
+			const download = this.downloadCoastline();
+			if (started === undefined) void download;
+			else started(download);
+		}).open();
+	}
+
+	/** Fetch the coastline into the reference folder. Only ever reached through the confirm modal. Never rejects. */
 	private async downloadCoastline(): Promise<void> {
 		const d = COPY.reference.download;
-		if (this.app.vault.getAbstractFileByPath(COASTLINE_PATH) !== null) {
-			new Notice(d.exists);
+		// Read once: a folder changed in the tab mid-download must not split the check from the write.
+		// Spelled as the vault spells it, and the file looked for without regard to case, as
+		// `References` reads it: otherwise a folder typed in the other case would gain a second copy.
+		const folders = this.app.vault.getAllLoadedFiles().filter((f): f is TFolder => f instanceof TFolder).map((f) => f.path);
+		const folder = matchFolderCase(this.settings.referenceFolder, folders);
+		const path = coastlinePath(folder);
+		const want = path.toLowerCase();
+		if (this.app.vault.getFiles().some((f) => f.path.toLowerCase() === want)) {
+			new Notice(d.exists(folder));
 			return;
 		}
 		try {
 			const res = await requestUrl({ url: COASTLINE_URL });
 			// Parsed BEFORE anything is written: a captive portal or a moved file answers 200 with
-			// HTML, and saving that would leave a file in Geb/reference that only ever reports a
+			// HTML, and saving that would leave a file in the reference folder that only ever reports a
 			// problem. The parse is thrown away; `References` parses the saved file itself.
 			const text = res.text;
 			const parsed = parseGeoJsonLines(text, COASTLINE_URL);
@@ -215,11 +259,11 @@ export default class GebPlugin extends Plugin {
 			}
 			// The folder may exist on disk but not yet in the vault's index (made outside Obsidian,
 			// or mid-sync); `createFolder` throws "Folder already exists" for it, so ask the disk.
-			if (this.app.vault.getFolderByPath(COASTLINE_FOLDER) === null && !(await this.app.vault.adapter.exists(COASTLINE_FOLDER))) {
-				await this.app.vault.createFolder(COASTLINE_FOLDER);
+			if (this.app.vault.getFolderByPath(folder) === null && !(await this.app.vault.adapter.exists(folder))) {
+				await this.app.vault.createFolder(folder);
 			}
-			await this.app.vault.create(COASTLINE_PATH, text);
-			new Notice(d.done(COASTLINE_PATH));
+			await this.app.vault.create(path, text);
+			new Notice(d.done(path));
 		} catch (e) {
 			// KNOWN LIMIT: offline is judged by `navigator.onLine`, which reports a connected
 			// interface, not a reachable internet; a dead network behind a live link reads as a
@@ -336,11 +380,10 @@ export default class GebPlugin extends Plugin {
 			this.app.workspace.setActiveLeaf(started, { focus: true });
 			return;
 		}
-		const folder = file.parent === null || file.parent.path === "/" ? "" : `${file.parent.path}/`;
-		const defaults: CreateChoice = { id: file.basename, notePath: normalizePath(`${folder}${file.basename}.md`) };
+		const defaults: CreateChoice = { id: file.basename, notePath: defaultNotePath(file.path, this.settings.newNoteFolder) };
 		const refuse = (choice: CreateChoice): string | null => {
 			try {
-				if (api.getGeoref(choice.id) !== null) return `Another note already claims the id "${choice.id}".`;
+				if (api.getGeoref(choice.id) !== null) return `Another note already uses the ID "${choice.id}".`;
 			} catch (e) {
 				return e instanceof Error ? e.message : String(e);
 			}
@@ -392,7 +435,7 @@ export default class GebPlugin extends Plugin {
 			if (bad.length > 0) {
 				// Previously the return value was discarded entirely, so "reported, not guessed"
 				// had no reporter and a broken georeference failed in silence.
-				new Notice(`${DISPLAY_NAME}: ${bad.length} georeference(s) need attention after a rename. See the console.`);
+				new Notice(`${DISPLAY_NAME}: ${bad.length} map(s) need attention after a rename. See the console.`);
 				for (const o of bad) console.warn(`${DISPLAY_NAME}: ${o.notePath} -> ${o.action}`, o.error ?? o.from ?? "");
 			}
 		} catch (e) {
@@ -428,10 +471,10 @@ export default class GebPlugin extends Plugin {
 			console.warn(`${DISPLAY_NAME}: ${o.notePath} -> ${o.action}${o.detail === undefined ? "" : `: ${o.detail}`}`);
 		}
 		if (relinked.length > 0) {
-			new Notice(`${DISPLAY_NAME}: repaired ${relinked.length} image link(s) by matching file contents.`);
+			new Notice(`${DISPLAY_NAME}: Repaired ${relinked.length} image link(s) by matching file contents.`);
 		}
 		if (attention.length > 0) {
-			new Notice(`${DISPLAY_NAME}: ${attention.length} georeference(s) need attention. See the console.`);
+			new Notice(`${DISPLAY_NAME}: ${attention.length} map(s) need attention. See the console.`);
 		}
 	}
 

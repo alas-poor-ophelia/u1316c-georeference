@@ -316,13 +316,13 @@ describe("the readout and the trust summary", () => {
 	});
 
 	test("the full summary string is pinned for each model, so the separator placement cannot drift", () => {
-		expect(trust({ ...fit(), model: "affine" }).summary).toBe("affine, 8 points · RMS 2.6 px · worst point 2 4.8 px");
+		expect(trust({ ...fit(), model: "affine" }).summary).toBe("Affine, 8 points · RMS 2.6 px · worst point 2 4.8 px");
 		expect(trust({ ...fit(), model: "polynomial2" }).summary).toBe(
-			"polynomial2, 8 points · RMS 2.6 px · worst point 2 4.8 px",
+			"Polynomial, 8 points · RMS 2.6 px · worst point 2 4.8 px",
 		);
-		expect(trust(fit()).summary).toBe("tps, 8 points · RMS 2.6 px · worst point 2 4.8 px");
+		expect(trust(fit()).summary).toBe("Spline, 8 points · RMS 2.6 px · worst point 2 4.8 px");
 		expect(trust({ ...fit(), model: "mercator" }).summary).toBe(
-			"mercator, 8 points · RMS 2.6 px in Mercator plane · worst point 2 4.8 px",
+			"Mercator, 8 points · RMS 2.6 px in Mercator plane · worst point 2 4.8 px",
 		);
 	});
 
@@ -352,12 +352,12 @@ describe("the readout and the trust summary", () => {
 
 	test("told the recommended count, the summary says how far short it is and the hull note goes last", () => {
 		const short = trust(fit({ notes: ["the fit is wrong"] }, 3), 8);
-		expect(short.summary.startsWith(`tps, 3 points ${COPY.recommendedSuffix(8)} · `)).toBe(true);
+		expect(short.summary.startsWith(`Spline, 3 points ${COPY.recommendedSuffix(8)} · `)).toBe(true);
 		expect(short.notes).toEqual(["the fit is wrong", COPY.spreadNote]);
 		// The leading caveat still leads; the view's own note is counted, not shown.
 		expect(short.summary).toContain("the fit is wrong (+1 more)");
 		const enough = trust(fit({}, 8), 8);
-		expect(enough.summary.startsWith("tps, 8 points · ")).toBe(true);
+		expect(enough.summary.startsWith("Spline, 8 points · ")).toBe(true);
 		expect(enough.notes).toEqual([COPY.spreadNote]);
 		// Without it the summary is the kernel's alone, as before.
 		expect(trust(fit({}, 3)).notes).toEqual([]);

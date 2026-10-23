@@ -2,8 +2,13 @@ import { debounce, type Debouncer, type Plugin, type TAbstractFile } from "obsid
 import type { ReferenceLine, ReferenceSet } from "../api/types";
 import { exceedsReferenceCap, parseGeoJsonLines, REFERENCE_MAX_BYTES } from "../reference/geojson";
 
-/** Where reference files live in the vault, compared against the lower-cased path. */
-export const REFERENCE_FOLDER = "geb/reference/";
+/**
+ * A reference folder as the path predicates compare it: lower-cased, with one trailing slash.
+ * The folder comes from the settings, which store it normalised with no slashes at either end.
+ */
+export function referencePrefix(folder: string): string {
+	return `${folder.toLowerCase().replace(/^\/+|\/+$/g, "")}/`;
+}
 
 /** The one change event the view listens for. */
 export const REFERENCE_CHANGED = "geb:reference-changed";
@@ -12,9 +17,9 @@ export const REFERENCE_CHANGED = "geb:reference-changed";
 export const EMPTY_REFERENCES: ReferenceSet = { lines: [], sources: [], problems: [] };
 const EMPTY = EMPTY_REFERENCES;
 
-function isReferencePath(path: string): boolean {
+function isReferencePath(prefix: string, path: string): boolean {
 	const p = path.toLowerCase();
-	return p.startsWith(REFERENCE_FOLDER) && p.endsWith(".geojson");
+	return p.startsWith(prefix) && p.endsWith(".geojson");
 }
 
 /**
@@ -22,8 +27,8 @@ function isReferencePath(path: string): boolean {
  * folder renamed whole fires ONE rename, for the folder, and none for the files moved with it, so
  * a move of `Geb` in or out of place has to rebuild on the folder's own path.
  */
-function holdsReferenceFolder(path: string): boolean {
-	return REFERENCE_FOLDER.startsWith(`${path.toLowerCase()}/`);
+function holdsReferenceFolder(prefix: string, path: string): boolean {
+	return prefix.startsWith(`${path.toLowerCase()}/`);
 }
 
 interface Parsed {
@@ -48,7 +53,13 @@ export class References {
 	constructor(
 		private readonly plugin: Plugin,
 		private readonly readBinary: (path: string) => Promise<ArrayBuffer>,
+		/** The reference folder from the settings, read afresh on every event and rebuild. */
+		private readonly folder: () => string,
 	) {}
+
+	private get prefix(): string {
+		return referencePrefix(this.folder());
+	}
 
 	current(): ReferenceSet {
 		return this.set;
@@ -59,18 +70,34 @@ export class References {
 		const { vault } = this.plugin.app;
 		this.rebuildSoon = debounce(() => void this.rebuild(), 300, true);
 		const touch = (file: TAbstractFile, oldPath?: string): void => {
-			if (isReferencePath(file.path) || (oldPath !== undefined && isReferencePath(oldPath))) this.rebuildSoon?.();
+			const prefix = this.prefix;
+			if (isReferencePath(prefix, file.path) || (oldPath !== undefined && isReferencePath(prefix, oldPath))) this.rebuildSoon?.();
 		};
 		this.plugin.registerEvent(vault.on("create", (f) => touch(f)));
 		this.plugin.registerEvent(vault.on("modify", (f) => touch(f)));
 		this.plugin.registerEvent(vault.on("delete", (f) => touch(f)));
 		this.plugin.registerEvent(
 			vault.on("rename", (f, oldPath) => {
-				if (holdsReferenceFolder(f.path) || holdsReferenceFolder(oldPath)) this.rebuildSoon?.();
+				const prefix = this.prefix;
+				if (holdsReferenceFolder(prefix, f.path) || holdsReferenceFolder(prefix, oldPath)) this.rebuildSoon?.();
 				else touch(f, oldPath);
 			}),
 		);
 		void this.rebuild();
+	}
+
+	/**
+	 * The reference folder setting changed. The events need no re-registering, because they read
+	 * the folder on each call; what was parsed from the old folder is dropped and the new folder
+	 * is read after the same debounce a vault event gets, so the old lines may stay drawn for up
+	 * to 300 ms. Before `start()` there is nothing to rebuild.
+	 */
+	folderChanged(): void {
+		if (!this.alive || this.rebuildSoon === null) return;
+		// Debounced like a vault event, not immediate: the settings field may report every
+		// keystroke, and each report would otherwise re-read a 10 MB coastline.
+		this.cache.clear();
+		this.rebuildSoon();
 	}
 
 	dispose(): void {
@@ -83,9 +110,10 @@ export class References {
 
 	private async rebuild(): Promise<void> {
 		const mine = ++this.generation;
+		const prefix = this.prefix;
 		const files = this.plugin.app.vault
 			.getFiles()
-			.filter((f) => isReferencePath(f.path))
+			.filter((f) => isReferencePath(prefix, f.path))
 			.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 		const lines: ReferenceLine[] = [];
 		const sources: string[] = [];

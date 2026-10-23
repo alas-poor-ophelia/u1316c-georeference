@@ -66,7 +66,7 @@ export function trust(fit: FitInfo, recommended?: number): Trust {
 			: { label: worst.label ?? `point ${worst.index + 1}`, error: worst.error };
 
 	const short = recommended !== undefined && fit.pointCount < recommended;
-	const count = `${fit.model}, ${fit.pointCount} points`;
+	const count = `${COPY.models.short[fit.model]}, ${fit.pointCount} points`;
 	const notes = [...d.notes];
 	if (recommended !== undefined) {
 		// Fittable and short of the recommended count is the polynomial's "six or seven": both

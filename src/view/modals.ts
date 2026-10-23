@@ -53,7 +53,7 @@ export class PointModal extends Modal {
 
 		new Setting(contentEl)
 			.setName("From a place note")
-			.setDesc("Take the coordinate and label from a note that already carries one.")
+			.setDesc("Use the coordinate and label from a note that already carries coordinates.")
 			.addButton((b) =>
 				b.setButtonText("Pick…").onClick(() => {
 					new PlacePicker(this.app, this.features(), (f) => this.fill(f)).open();
@@ -210,7 +210,7 @@ export class CreateGeorefModal extends Modal {
 		this.errorEl = contentEl.createDiv({ cls: "geb-form-error" });
 		new Setting(contentEl).addButton((b) =>
 			b
-				.setButtonText("Start placing points")
+				.setButtonText("Place points")
 				.setCta()
 				.onClick(() => this.submit()),
 		);
