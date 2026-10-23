@@ -6,6 +6,7 @@
  * disagrees with its sign, and a trust summary that reads "0.0 px" for a fit nobody should trust.
  */
 import type { FitInfo, LatLng } from "../api/types";
+import { COPY } from "./copy";
 
 /**
  * A hover readout. Six decimals is about 10 cm at the equator — past the precision any hand-placed
@@ -33,7 +34,10 @@ export interface Trust {
 	readonly rms: number;
 	/** The worst single control point, so a user knows where to look. */
 	readonly worst: { readonly label: string; readonly error: number } | null;
-	/** Caveats the kernel attached — too few points for the model, every point on the hull. */
+	/**
+	 * Caveats the kernel attached — too few points for the model, every point on the hull — and,
+	 * when `trust` was told the recommended count, the view's own guidance after them.
+	 */
 	readonly notes: readonly string[];
 	/** A short verdict for a status line. */
 	readonly summary: string;
@@ -47,8 +51,13 @@ export interface Trust {
  * display built on them would report perfect confidence in a broken map. The affine residuals are
  * always meaningful because an affine fit cannot bend to absorb a mistake, which is why the kernel
  * computes them for every model.
+ *
+ * GIVEN THE MODEL'S RECOMMENDED COUNT, the summary also carries the view's guidance: the count
+ * says how far short of it the fit is, a polynomial below it is called barely determined, and the
+ * note about the dashed hull goes LAST, after every caveat the kernel ranked. Without it the
+ * summary is the kernel's alone, which is what a caller with no view to point at wants.
  */
-export function trust(fit: FitInfo): Trust {
+export function trust(fit: FitInfo, recommended?: number): Trust {
 	const d = fit.diagnostics;
 	const worst = [...d.affine].sort((a, b) => b.error - a.error)[0];
 	const named =
@@ -56,17 +65,27 @@ export function trust(fit: FitInfo): Trust {
 			? null
 			: { label: worst.label ?? `point ${worst.index + 1}`, error: worst.error };
 
-	const parts = [`${fit.model}, ${fit.pointCount} points`, `RMS ${d.affineRms.toFixed(1)} px`];
+	const short = recommended !== undefined && fit.pointCount < recommended;
+	const count = `${fit.model}, ${fit.pointCount} points`;
+	const notes = [...d.notes];
+	if (recommended !== undefined) {
+		// Fittable and short of the recommended count is the polynomial's "six or seven": both
+		// numbers come from the kernel, so neither is written down here.
+		if (short && fit.model === "polynomial2") notes.push(COPY.barelyDetermined(fit.pointCount, recommended));
+		notes.push(COPY.spreadNote);
+	}
+
+	const parts = [short && recommended !== undefined ? `${count} ${COPY.recommendedSuffix(recommended)}` : count, `RMS ${d.affineRms.toFixed(1)} px`];
 	if (named !== null && d.affine.length > 1) parts.push(`worst ${named.label} ${named.error.toFixed(1)} px`);
 	// ALWAYS SHOW THE LEADING CAVEAT, not a bare count. This used to collapse to "2 caveats" the
 	// moment a second one appeared, which is the worst possible behaviour: the caveats that fire
 	// together are the serious ones — a wrapped antimeridian plus a three-point fit — and the user
 	// got a number instead of either. The kernel orders `notes` most-invalidating first precisely
 	// so this line can take the first and say how many more there are.
-	if (d.notes.length === 1) parts.push(d.notes[0]!);
-	else if (d.notes.length > 1) parts.push(`${d.notes[0]!} (+${d.notes.length - 1} more)`);
+	if (notes.length === 1) parts.push(notes[0]!);
+	else if (notes.length > 1) parts.push(`${notes[0]!} (+${notes.length - 1} more)`);
 
-	return { rms: d.affineRms, worst: named, notes: d.notes, summary: parts.join(" · ") };
+	return { rms: d.affineRms, worst: named, notes: recommended === undefined ? d.notes : notes, summary: parts.join(" · ") };
 }
 
 /**

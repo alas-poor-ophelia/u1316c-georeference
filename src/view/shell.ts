@@ -46,6 +46,7 @@
  */
 import { isCodedError } from "../api/errors";
 import type { ControlPoint, FitInfo, FitPreview, GebAPI, GebEventPayload, LatLng, Pixel, PinInfo, TransformKind } from "../api/types";
+import { COPY } from "./copy";
 import { coordinate, trust } from "./format";
 import { graticule as planGraticule, label as graticuleLabel } from "./graticule";
 import { nearestIndex, pinAt, uncertaintyRadius } from "./pins";
@@ -99,6 +100,7 @@ export interface FrameEdit {
 	readonly crs: string;
 	readonly pointCount: number;
 	readonly minPoints: number;
+	readonly recommendedPoints: number;
 	readonly selected: number | null;
 	/** The draft fits, so Save is possible. */
 	readonly fittable: boolean;
@@ -106,6 +108,41 @@ export interface FrameEdit {
 	readonly saving: boolean;
 	/** The map has no note yet. */
 	readonly creating: boolean;
+	/** Why Save is or is not offered, for its tooltip. */
+	readonly saveTip: string;
+	/**
+	 * The label of the point just deleted, so the adapter can offer to undo it. Set in the ONE
+	 * frame painted right after the delete; `undoDelete` stays possible until the draft next changes.
+	 */
+	readonly lastDeletedLabel: string | null;
+}
+
+/** One control point's line in the fit report. */
+export interface FitReportRow {
+	readonly label: string;
+	readonly px: number;
+	readonly py: number;
+	readonly lat: number;
+	readonly lng: number;
+	/** The affine residual, in image pixels. */
+	readonly error: number;
+	/** The leave-one-out error, or null where the kernel computed none (affine, a spline below four). */
+	readonly loo: number | null;
+	/** On the hull, so its leave-one-out error is extrapolated and not diagnostic. */
+	readonly hull: boolean;
+}
+
+/** Everything the fit report dialog shows, for the fit on screen. Plain data. */
+export interface FitReport {
+	readonly model: TransformKind;
+	readonly pointCount: number;
+	readonly rms: number;
+	readonly worst: { readonly label: string; readonly error: number } | null;
+	readonly looRms: number | null;
+	readonly coveragePct: number | null;
+	/** Every note, the kernel's and the view's, in the order the status line ranks them. */
+	readonly notes: readonly string[];
+	readonly rows: readonly FitReportRow[];
 }
 
 /** Everything the surface needs to paint one state of the view. Plain data. */
@@ -126,6 +163,20 @@ export interface Frame {
 	readonly readout: string;
 	/** The trust summary for the status line. */
 	readonly status: string;
+	/**
+	 * The convex hull of the control points in image pixels — the draft's while editing, else the
+	 * loaded fit's — counter-clockwise. Empty below three points or when they enclose no area.
+	 * Same array until those points change.
+	 */
+	readonly hull: readonly { readonly x: number; readonly y: number }[];
+	/** The hull's area as a whole percentage of the image's, or null when there is no hull. */
+	readonly coveragePct: number | null;
+	/** Guidance over a new map whose draft is still empty, or null. */
+	readonly banner: string | null;
+	/** A save has been written and the index has not yet handed it back. */
+	readonly pending: boolean;
+	/** The fit on screen, for the report dialog: the draft's while editing, else the loaded one. */
+	readonly report: FitReport | null;
 }
 
 /**
@@ -172,6 +223,8 @@ export type Tap =
 	| { readonly kind: "place"; readonly pixel: Pixel };
 
 const MISS: Tap = { kind: "miss" };
+/** One empty list, so a map with no points hands every frame the same hull. */
+const NO_POINTS: readonly ControlPoint[] = [];
 
 /** Zoom bounds relative to the fit-to-container scale, so they mean the same on any image. */
 const ZOOM_OUT_LIMIT = 0.25;
@@ -207,6 +260,9 @@ export const STATUS = {
 	unsaved: "unsaved",
 	failed: (reason: string): string => `Save failed: ${reason}`,
 } as const;
+
+/** Save's tooltip when it is offered. The adapter's own wording, moved here with the decision. */
+const SAVE_TIP = "Write the control points to the georeference note";
 
 interface EditState {
 	readonly model: TransformKind;
@@ -264,6 +320,18 @@ export class MapShell {
 	private problem: string | null = null;
 	/** Which `measureImage` answer is still wanted: a reload or a close orphans earlier ones. */
 	private measureGen = 0;
+	/** The point the last delete removed and where it was, until the draft next changes. */
+	private undo: { readonly point: ControlPoint; readonly index: number } | null = null;
+	/** The deleted point's label, for the one frame that announces the delete. */
+	private deletedNotice: string | null = null;
+	/**
+	 * Hull and report, rebuilt only when the points or the fit they describe change, so a hover's
+	 * repaint hands the adapter the same objects and it can skip the overlay and the dialog.
+	 */
+	private hullOf: readonly ControlPoint[] | null = null;
+	private frameHull: readonly Pixel[] = [];
+	private reportOf: FitInfo | null = null;
+	private frameReport: FitReport | null = null;
 
 	private unsubscribes: (() => void)[] = [];
 	private closed = false;
@@ -665,6 +733,7 @@ export class MapShell {
 	discardEdit(): void {
 		if (this.edit === null || this.saving) return;
 		this.problem = null;
+		this.undo = null;
 		if (this.create !== null) {
 			this.setEdit(this.edit.model, [], null);
 			return;
@@ -677,12 +746,14 @@ export class MapShell {
 
 	setModel(model: TransformKind): void {
 		if (this.locked || this.edit === null) return;
+		this.undo = null;
 		this.setEdit(model, this.edit.points, this.edit.selected);
 	}
 
 	/** Append a point, selected. The adapter calls this once the user has given a coordinate. */
 	placePoint(point: ControlPoint): void {
 		if (this.locked || this.edit === null) return;
+		this.undo = null;
 		this.setEdit(this.edit.model, [...this.edit.points, this.clamp(point)], this.edit.points.length);
 	}
 
@@ -690,13 +761,36 @@ export class MapShell {
 		if (this.locked || this.edit === null || this.edit.points[index] === undefined) return;
 		const next = this.clamp(point);
 		const points = this.edit.points.map((p, i) => (i === index ? next : p));
+		this.undo = null;
 		this.setEdit(this.edit.model, points, index);
 	}
 
+	/**
+	 * Remove a point, and remember it until the draft next changes in any way — a placement, a
+	 * move, a model change, another delete, a discard or a save — so one slip of a finger on a
+	 * twenty-point draft costs one tap, not a re-typed coordinate.
+	 */
 	deletePoint(index: number): void {
-		if (this.locked || this.edit === null || this.edit.points[index] === undefined) return;
+		if (this.locked || this.edit === null) return;
+		const point = this.edit.points[index];
+		if (point === undefined) return;
 		const points = this.edit.points.filter((_, i) => i !== index);
+		this.undo = { point, index };
+		this.deletedNotice = point.label === undefined || point.label === "" ? `point ${index + 1}` : point.label;
 		this.setEdit(this.edit.model, points, null);
+	}
+
+	/** Put the last deleted point back where it was, selected. False when there is nothing to undo. */
+	undoDelete(): boolean {
+		const u = this.undo;
+		if (this.locked || this.edit === null || u === null) return false;
+		const points = [...this.edit.points];
+		const index = Math.min(u.index, points.length);
+		points.splice(index, 0, u.point);
+		this.undo = null;
+		this.deletedNotice = null;
+		this.setEdit(this.edit.model, points, index);
+		return true;
 	}
 
 	select(index: number | null): void {
@@ -744,6 +838,8 @@ export class MapShell {
 		if (e === null || this.image === null || this.saving || !e.preview.ok) return false;
 		this.saving = true;
 		this.problem = null;
+		this.undo = null;
+		this.deletedNotice = null;
 		this.refreshEdit();
 		this.paint();
 		let written = false;
@@ -814,16 +910,21 @@ export class MapShell {
 			this.frameEdit = null;
 			return;
 		}
+		const min = this.api.minPoints[e.model];
+		const dirty = this.isDirty();
 		this.frameEdit = {
 			model: e.model,
 			crs: this.crs,
 			pointCount: e.points.length,
-			minPoints: this.api.minPoints[e.model],
+			minPoints: min,
+			recommendedPoints: this.api.recommendedPoints[e.model],
 			selected: e.selected,
 			fittable: e.preview.ok,
-			dirty: this.isDirty(),
+			dirty,
 			saving: this.saving,
 			creating: this.create !== null,
+			saveTip: e.points.length < min ? COPY.tips.saveNeed(min - e.points.length) : e.preview.ok && !dirty ? COPY.tips.saveClean : SAVE_TIP,
+			lastDeletedLabel: this.deletedNotice,
 		};
 	}
 
@@ -862,6 +963,19 @@ export class MapShell {
 
 	private paint(): void {
 		if (this.image === null) return;
+		const image = this.image;
+		const e = this.edit;
+		const shown = e === null ? this.fit : e.preview.ok ? e.preview.fit : null;
+		const points = e?.points ?? this.fit?.points ?? NO_POINTS;
+		if (points !== this.hullOf) {
+			this.hullOf = points;
+			this.frameHull = pixelHull(points);
+		}
+		const coveragePct = coverage(this.frameHull, image);
+		if (shown !== this.reportOf) {
+			this.reportOf = shown;
+			this.frameReport = shown === null ? null : this.report(shown, coverage(pixelHull(shown.points), image));
+		}
 		this.surface.paint({
 			image: { src: this.src, width: this.image.width, height: this.image.height },
 			viewport: this.viewport,
@@ -873,7 +987,48 @@ export class MapShell {
 			canEdit: this.edit === null && this.pending === null && !this.saving && this.fit !== null,
 			readout: this.readout(),
 			status: this.status(),
+			hull: this.frameHull,
+			coveragePct,
+			banner: e !== null && this.create !== null && e.points.length === 0 ? COPY.emptyBanner : null,
+			pending: this.pending !== null,
+			report: this.frameReport,
 		});
+		// The delete is announced once. The next frame, whatever moved it, is an ordinary one.
+		if (this.deletedNotice !== null) {
+			this.deletedNotice = null;
+			this.refreshEdit();
+		}
+	}
+
+	/**
+	 * The fit report: the status line's numbers, every note in full, and a row per point. The
+	 * leave-one-out column is null wherever the kernel declined to compute it — an affine fit, a
+	 * spline below four points — rather than a zero that would read as a perfect score.
+	 */
+	private report(fit: FitInfo, coveragePct: number | null): FitReport {
+		const t = trust(fit, this.api.recommendedPoints[fit.model]);
+		const d = fit.diagnostics;
+		const affine = new Map(d.affine.map((r) => [r.index, r]));
+		const loo = new Map((d.loo ?? []).map((r) => [r.index, r.error]));
+		return {
+			model: fit.model,
+			pointCount: fit.pointCount,
+			rms: t.rms,
+			worst: t.worst,
+			looRms: d.looRms ?? null,
+			coveragePct,
+			notes: t.notes,
+			rows: fit.points.map((p, i) => ({
+				label: p.label === undefined || p.label === "" ? `point ${i + 1}` : p.label,
+				px: p.px,
+				py: p.py,
+				lat: p.lat,
+				lng: p.lng,
+				error: affine.get(i)?.error ?? 0,
+				loo: loo.get(i) ?? null,
+				hull: affine.get(i)?.onHull ?? false,
+			})),
+		};
 	}
 
 	/**
@@ -881,17 +1036,27 @@ export class MapShell {
 	 * shaping — and the kernel's own caveats ride along, so a three-point affine says why its
 	 * residuals are zero without this layer repeating it. A draft outranks "saved, waiting": a
 	 * restored draft on a map still being indexed is the thing the user is looking at.
+	 *
+	 * TOO FEW POINTS IS GUIDANCE, NOT AN ERROR. A new map opens with none, and greeting it with
+	 * "thin-plate spline needs at least 3 control points; got 0." reads as something already gone
+	 * wrong. Only that one refusal is reworded: any other — collinear points, a degenerate solve —
+	 * is the kernel saying something the user must hear in its own words.
 	 */
 	private status(): string {
 		if (this.problem !== null) return STATUS.failed(this.problem);
 		if (this.saving) return STATUS.saving;
 		const e = this.edit;
 		if (e !== null) {
-			const base = e.preview.ok ? trust(e.preview.fit).summary : e.preview.message;
+			const p = e.preview;
+			const base = p.ok
+				? trust(p.fit, this.api.recommendedPoints[e.model]).summary
+				: p.code === "geb-too-few-points"
+					? COPY.belowMin(e.points.length, this.api.minPoints[e.model])
+					: p.message;
 			return this.isDirty() ? `${base} · ${STATUS.unsaved}` : base;
 		}
 		if (this.pending !== null) return STATUS.saved;
-		return this.fit === null ? "" : trust(this.fit).summary;
+		return this.fit === null ? "" : trust(this.fit, this.api.recommendedPoints[this.fit.model]).summary;
 	}
 
 	private framePin(p: PinInfo): FramePin {
@@ -1015,6 +1180,50 @@ export class MapShell {
 		const text = graticuleLabel(value, axis, step);
 		return runs.map((points, i) => ({ axis, label: i === longest ? text : "", points }));
 	}
+}
+
+/**
+ * The convex hull of the points' PIXELS, counter-clockwise, or empty when they enclose no area.
+ *
+ * The fit carries its hull in world space, and the view draws in image pixels; an affine image of
+ * the world hull would be close and not the same polygon under a spline. The kernel's own
+ * `convexHull` is behind the dogfooding fence, so this is the same monotone chain, over pixels.
+ * KNOWN LIMIT: the kernel flags hull membership in world space (lng, lat) and this outline is
+ * drawn in pixel space; under a strongly bent spline, or a map crossing the antimeridian, a
+ * report row's hull flag and the drawn outline can disagree. For a near-affine map they agree.
+ * Exported so a test can hold it against the kernel's: a second copy of an algorithm is only
+ * acceptable while something proves the two still agree.
+ */
+export function pixelHull(points: readonly ControlPoint[]): Pixel[] {
+	const pts = points.map((p) => ({ x: p.px, y: p.py })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+	if (pts.length < 3) return [];
+	pts.sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+	const cross = (o: Pixel, a: Pixel, b: Pixel): number => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+	const chain = (seq: readonly Pixel[]): Pixel[] => {
+		const out: Pixel[] = [];
+		for (const p of seq) {
+			while (out.length >= 2 && cross(out[out.length - 2]!, out[out.length - 1]!, p) <= 0) out.pop();
+			out.push(p);
+		}
+		out.pop();
+		return out;
+	};
+	const hull = [...chain(pts), ...chain([...pts].reverse())];
+	return hull.length >= 3 ? hull : [];
+}
+
+/** A hull's area as a whole percentage of the image's, by the shoelace formula. */
+function coverage(hull: readonly Pixel[], image: Size): number | null {
+	if (hull.length < 3 || !(image.width > 0 && image.height > 0)) return null;
+	let twice = 0;
+	for (let i = 0; i < hull.length; i++) {
+		const a = hull[i]!;
+		const b = hull[(i + 1) % hull.length]!;
+		twice += a.x * b.y - b.x * a.y;
+	}
+	// Capped: a note may hold a point beyond the image's edge, and a trusted area wider than the
+	// map is a data error to report elsewhere, not a percentage over a hundred.
+	return Math.min(100, Math.round((Math.abs(twice) / 2 / (image.width * image.height)) * 100));
 }
 
 /** "places/Eboracum.md" -> "Eboracum". */

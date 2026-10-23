@@ -15,7 +15,8 @@
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 import { ApiController } from "../src/api/controller";
-import type { ControlPoint } from "../src/api/types";
+import type { ControlPoint, FitInfo } from "../src/api/types";
+import { COPY } from "../src/view/copy";
 import { trust } from "../src/view/format";
 import { DEFAULT_MODEL, MapShell, MESSAGES, STATUS, type CreateSource } from "../src/view/shell";
 import { fitToContainer, toImage, toScreen } from "../src/view/viewport";
@@ -44,6 +45,9 @@ async function creating(draft?: { model: "affine" | "polynomial2" | "tps"; point
 	return shell;
 }
 
+/** The status line's summary of a fit: the trust verdict, with the view's guidance for its model. */
+const summary = (fit: FitInfo): string => trust(fit, c.api.recommendedPoints[fit.model]).summary;
+
 /** Where a control point sits on screen under the current viewport. */
 const screenOf = (shell: MapShell, p: ControlPoint): { x: number; y: number } => toScreen(shell.view, { x: p.px, y: p.py });
 
@@ -66,10 +70,11 @@ describe("a map with no note yet", () => {
 		expect(f.controlPoints).toEqual([]);
 		expect(f.edit).toMatchObject({ creating: true, pointCount: 0, fittable: false, dirty: false, saving: false, model: DEFAULT_MODEL, selected: null });
 		expect(f.edit?.minPoints).toBe(c.api.minPoints[DEFAULT_MODEL]);
-		// The status says what the API said about an empty draft, not a number.
+		// The API refuses an empty draft as too few points, and the status turns that into guidance.
 		const empty = c.api.previewFit([], { kind: DEFAULT_MODEL });
 		expect(empty.ok).toBe(false);
-		if (!empty.ok) expect(f.status).toBe(empty.message);
+		if (!empty.ok) expect(empty.code).toBe("geb-too-few-points");
+		expect(f.status).toBe(COPY.belowMin(0, c.api.minPoints[DEFAULT_MODEL]));
 		expect(shell.draft).toEqual({ model: DEFAULT_MODEL, points: [] });
 	});
 
@@ -121,14 +126,14 @@ describe("placing points", () => {
 		expect(f.controlPoints).toHaveLength(need - 1);
 		const short = c.api.previewFit(CLEAN.slice(0, need - 1), { kind: DEFAULT_MODEL });
 		expect(short.ok).toBe(false);
-		if (!short.ok) expect(f.status).toBe(`${short.message} · ${STATUS.unsaved}`);
+		expect(f.status).toBe(`${COPY.belowMin(need - 1, need)} · ${STATUS.unsaved}`);
 
 		shell.placePoint(CLEAN[need - 1]!);
 		f = s.last;
 		expect(f.edit).toMatchObject({ pointCount: need, fittable: true, dirty: true, selected: need - 1 });
 		const fit = c.api.previewFit(CLEAN.slice(0, need), { kind: DEFAULT_MODEL });
 		expect(fit.ok).toBe(true);
-		if (fit.ok) expect(f.status).toBe(`${trust(fit.fit).summary} · ${STATUS.unsaved}`);
+		if (fit.ok) expect(f.status).toBe(`${summary(fit.fit)} · ${STATUS.unsaved}`);
 	});
 
 	test("markers carry NO residual at the exactly-determined count, and the API's residuals above it", async () => {
@@ -176,7 +181,7 @@ describe("placing points", () => {
 		expect(s.last.edit).toMatchObject({ model: "polynomial2", fittable: true });
 		const fit = c.api.previewFit(CLEAN, { kind: "polynomial2" });
 		expect(fit.ok).toBe(true);
-		if (fit.ok) expect(s.last.status).toBe(`${trust(fit.fit).summary} · ${STATUS.unsaved}`);
+		if (fit.ok) expect(s.last.status).toBe(`${summary(fit.fit)} · ${STATUS.unsaved}`);
 	});
 
 	test("a tap selects the nearest draft point within the hit radius, scaled by the zoom", async () => {
@@ -295,7 +300,7 @@ describe("saving a new map", () => {
 		const fit = c.api.getFit(NEW_ID);
 		expect(fit.points).toEqual(CLEAN);
 		expect(fit.model).toBe(DEFAULT_MODEL);
-		expect(s.last.status).toBe(trust(fit).summary);
+		expect(s.last.status).toBe(summary(fit));
 		expect(s.last.lines.length).toBeGreaterThan(0);
 		// The viewport the user had is kept across the arrival.
 		expect(s.last.viewport).toBe(zoomed);
@@ -304,7 +309,7 @@ describe("saving a new map", () => {
 		shell.beginEdit();
 		expect(shell.draft).toEqual({ model: DEFAULT_MODEL, points: CLEAN });
 		expect(s.last.edit?.dirty).toBe(false);
-		expect(s.last.status).toBe(trust(fit).summary);
+		expect(s.last.status).toBe(summary(fit));
 	});
 
 	test("an event that beats the write's own promise still completes the save", async () => {
@@ -330,7 +335,7 @@ describe("saving a new map", () => {
 		expect(await shell.save()).toBe(true);
 		// No further event will come. The save itself must have found the map.
 		const fit = c.api.getFit(NEW_ID);
-		expect(s.last.status).toBe(trust(fit).summary);
+		expect(s.last.status).toBe(summary(fit));
 		expect(s.last.lines.length).toBeGreaterThan(0);
 		expect(s.last.canEdit).toBe(true);
 	});
@@ -427,7 +432,7 @@ describe("editing a saved map", () => {
 		f.controlPoints.forEach((cp, i) => expect(cp.errorPx).toBe(fit.diagnostics.affine.find((r) => r.index === i)!.error));
 		// The saved map stays underneath: graticule and readout still answer.
 		expect(f.lines.length).toBeGreaterThan(0);
-		expect(f.status).toBe(trust(fit).summary);
+		expect(f.status).toBe(summary(fit));
 	});
 
 	test("a second beginEdit does not restart an edit in progress", () => {
@@ -490,7 +495,7 @@ describe("editing a saved map", () => {
 		vaultChanged(v, c, NOTE);
 		const after = c.api.getFit(ID);
 		expect(after.points[1]).toEqual({ ...CLEAN[1]!, px: img.x, py: img.y });
-		expect(s.last.status).toBe(trust(after).summary);
+		expect(s.last.status).toBe(summary(after));
 		expect(s.last.controlPoints).toEqual([]);
 	});
 
@@ -520,7 +525,7 @@ describe("editing a saved map", () => {
 		expect(s.last.edit).toBeNull();
 		expect(shell.draft).toBeNull();
 		expect(s.last.controlPoints).toEqual([]);
-		expect(s.last.status).toBe(trust(c.api.getFit(ID)).summary);
+		expect(s.last.status).toBe(summary(c.api.getFit(ID)));
 		expect(v.writes).toEqual([]);
 		await settled();
 		expect(c.api.getFit(ID).points).toEqual(CLEAN);
@@ -553,7 +558,7 @@ describe("the draft across the shell's lifetime", () => {
 		expect(s.last.edit).toMatchObject({ creating: false, model: "tps", pointCount: CLEAN.length, dirty: false, fittable: true });
 		const fit = c.api.previewFit(CLEAN, { kind: "tps", lambda: 0.5 });
 		expect(fit.ok).toBe(true);
-		if (fit.ok) expect(s.last.status).toBe(trust(fit.fit).summary);
+		if (fit.ok) expect(s.last.status).toBe(summary(fit.fit));
 		expect(s.last.status.endsWith(STATUS.unsaved)).toBe(false);
 	});
 
@@ -597,6 +602,177 @@ describe("the draft across the shell's lifetime", () => {
 		expect(shell.draft).toBeNull();
 		expect(shell.tap({ x: 10, y: 10 }).kind).toBe("miss");
 		expect(shell.grab({ x: 10, y: 10 })).toBeNull();
+	});
+});
+
+describe("guidance while placing", () => {
+	test("an empty new map says how many points it needs and shows the banner; the first point lifts the banner", async () => {
+		const shell = await creating();
+		const min = c.api.minPoints[DEFAULT_MODEL];
+		expect(s.last.status).toBe(COPY.belowMin(0, min));
+		expect(s.last.banner).toBe(COPY.emptyBanner);
+		shell.placePoint(CLEAN[0]!);
+		expect(s.last.status).toBe(`${COPY.belowMin(1, min)} · ${STATUS.unsaved}`);
+		expect(s.last.banner).toBeNull();
+	});
+
+	test("a fittable spline short of the recommended count says so, and a collinear draft still says why it fails", async () => {
+		const shell = await creating();
+		for (const p of CLEAN.slice(0, 3)) shell.placePoint(p);
+		expect(s.last.status.startsWith(`tps, 3 points ${COPY.recommendedSuffix(c.api.recommendedPoints.tps)}`)).toBe(true);
+		expect(s.last.status.startsWith("tps, 3 points (8 recommended)")).toBe(true);
+		shell.discardEdit();
+		for (const p of COLLINEAR) shell.placePoint(p);
+		const preview = c.api.previewFit(COLLINEAR, { kind: DEFAULT_MODEL });
+		expect(preview.ok).toBe(false);
+		if (!preview.ok) {
+			expect(preview.code).not.toBe("geb-too-few-points");
+			expect(s.last.status).toBe(`${preview.message} · ${STATUS.unsaved}`);
+		}
+	});
+
+	test("a polynomial below the recommended count is called barely determined, and at it is not", async () => {
+		const shell = await creating();
+		shell.setModel("polynomial2");
+		const rec = c.api.recommendedPoints.polynomial2;
+		for (const p of CLEAN.slice(0, c.api.minPoints.polynomial2)) shell.placePoint(p);
+		expect(s.last.report?.notes).toContain(COPY.barelyDetermined(6, rec));
+		for (const p of CLEAN.slice(6)) shell.placePoint(p);
+		expect(s.last.edit?.pointCount).toBe(rec);
+		expect(s.last.report?.notes.some((n) => n.startsWith("Barely determined"))).toBe(false);
+	});
+
+	test("the note about the dashed hull is the LAST note of a loaded fit's report", () => {
+		openShell(c, s);
+		const notes = s.last.report?.notes ?? [];
+		expect(notes[notes.length - 1]).toBe(COPY.spreadNote);
+		expect(notes.slice(0, -1)).toEqual([...c.api.getFit(ID).diagnostics.notes]);
+	});
+
+	test("the hull is in image pixels, and a rectangle over a quarter of the image covers 25%", async () => {
+		const shell = await creating();
+		const rect: ControlPoint[] = [
+			{ px: 0, py: 0, lat: 56, lng: -4 },
+			{ px: IMAGE.width / 2, py: 0, lat: 56, lng: -2 },
+			{ px: IMAGE.width / 2, py: IMAGE.height / 2, lat: 54, lng: -2 },
+			{ px: 0, py: IMAGE.height / 2, lat: 54, lng: -4 },
+		];
+		expect(s.last.hull).toEqual([]);
+		expect(s.last.coveragePct).toBeNull();
+		for (const p of rect) shell.placePoint(p);
+		expect(s.last.hull).toHaveLength(4);
+		expect(s.last.coveragePct).toBe(25);
+		expect(s.last.report?.coveragePct).toBe(25);
+		// A hover repaints with the same hull, so the adapter can skip the overlay.
+		const before = s.last.hull;
+		shell.hoverAt({ x: 300, y: 200 });
+		expect(s.last.hull).toBe(before);
+	});
+
+	test("report rows match the fit point for point, with leave-one-out only where the kernel computed it", async () => {
+		const shell = await creating();
+		for (const p of CLEAN.slice(0, 3)) shell.placePoint(p);
+		let r = s.last.report!;
+		expect(r.rows).toHaveLength(r.pointCount);
+		expect(r.rows.every((row) => row.loo === null)).toBe(true);
+		expect(r.looRms).toBeNull();
+
+		shell.discardEdit();
+		shell.setModel("affine");
+		for (const p of CLEAN) shell.placePoint(p);
+		r = s.last.report!;
+		expect(r.model).toBe("affine");
+		expect(r.rows.every((row) => row.loo === null)).toBe(true);
+
+		shell.setModel("tps");
+		r = s.last.report!;
+		const fit = c.api.previewFit(CLEAN, { kind: "tps" });
+		expect(fit.ok).toBe(true);
+		if (!fit.ok) return;
+		const d = fit.fit.diagnostics;
+		expect(r.rows).toHaveLength(CLEAN.length);
+		expect(r.rows.map((row) => row.hull)).toEqual(d.affine.map((x) => x.onHull));
+		expect(r.rows.map((row) => row.error)).toEqual(d.affine.map((x) => x.error));
+		expect(r.rows.map((row) => row.loo)).toEqual(d.loo!.map((x) => x.error));
+		expect(r.rows.map((row) => row.label)).toEqual(CLEAN.map((p) => p.label!));
+		expect(r.looRms).toBe(d.looRms ?? null);
+	});
+
+	test("an unlabelled point is reported as point N, one-based", async () => {
+		const shell = await creating();
+		for (const p of CLEAN.slice(0, 3)) shell.placePoint({ px: p.px, py: p.py, lat: p.lat, lng: p.lng });
+		expect(s.last.report?.rows.map((row) => row.label)).toEqual(["point 1", "point 2", "point 3"]);
+	});
+
+	test("Save's tooltip says how many points are missing, or that there is nothing to save", async () => {
+		const shell = await creating();
+		for (const p of CLEAN.slice(0, 2)) shell.placePoint(p);
+		expect(s.last.edit?.saveTip).toBe(COPY.tips.saveNeed(1));
+		expect(s.last.edit?.recommendedPoints).toBe(c.api.recommendedPoints[DEFAULT_MODEL]);
+		shell.close();
+
+		s = new Recorder();
+		const saved = openShell(c, s);
+		saved.beginEdit();
+		expect(s.last.edit).toMatchObject({ fittable: true, dirty: false, saveTip: COPY.tips.saveClean });
+		saved.deletePoint(0);
+		expect(s.last.edit?.saveTip).not.toBe(COPY.tips.saveClean);
+		expect(s.last.edit?.saveTip).not.toBe(COPY.tips.saveNeed(1));
+	});
+});
+
+describe("undoing a delete", () => {
+	test("puts the point back at its index, selected, and the notice rides on one frame only", async () => {
+		const shell = await creating();
+		for (const p of CLEAN.slice(0, 4)) shell.placePoint(p);
+		expect(shell.undoDelete()).toBe(false);
+		shell.deletePoint(1);
+		expect(shell.draft?.points).toHaveLength(3);
+		expect(s.last.edit?.lastDeletedLabel).toBe(CLEAN[1]!.label);
+		shell.hoverAt({ x: 300, y: 200 });
+		expect(s.last.edit?.lastDeletedLabel).toBeNull();
+		// A selection is not a draft change, so the undo survives it.
+		shell.select(0);
+		expect(shell.undoDelete()).toBe(true);
+		expect(shell.draft?.points).toEqual(CLEAN.slice(0, 4));
+		expect(s.last.edit?.selected).toBe(1);
+		expect(s.last.edit?.lastDeletedLabel).toBeNull();
+		expect(shell.undoDelete()).toBe(false);
+	});
+
+	test("an unlabelled point is announced as point N", async () => {
+		const shell = await creating();
+		for (const p of CLEAN.slice(0, 3)) shell.placePoint({ px: p.px, py: p.py, lat: p.lat, lng: p.lng });
+		shell.deletePoint(2);
+		expect(s.last.edit?.lastDeletedLabel).toBe("point 3");
+	});
+
+	test("any later draft change forgets it", async () => {
+		const shell = await creating();
+		for (const p of CLEAN.slice(0, 4)) shell.placePoint(p);
+		shell.deletePoint(0);
+		shell.placePoint(CLEAN[5]!);
+		expect(shell.undoDelete()).toBe(false);
+		shell.deletePoint(0);
+		shell.setModel("affine");
+		expect(shell.undoDelete()).toBe(false);
+		shell.deletePoint(0);
+		shell.replacePoint(0, CLEAN[6]!);
+		expect(shell.undoDelete()).toBe(false);
+	});
+});
+
+describe("a save awaiting the index", () => {
+	test("is pending from the write until the index hands the note back", async () => {
+		const shell = await creating();
+		for (const p of CLEAN) shell.placePoint(p);
+		expect(s.last.pending).toBe(false);
+		v.lagReads = true;
+		expect(await shell.save()).toBe(true);
+		expect(s.last.pending).toBe(true);
+		vaultChanged(v, c, CREATE.notePath);
+		expect(s.last.pending).toBe(false);
+		expect(s.last.canEdit).toBe(true);
 	});
 });
 

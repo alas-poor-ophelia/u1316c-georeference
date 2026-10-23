@@ -31,6 +31,15 @@
 	cursor: pointer;
 }
 
+/* Details and the status line, pushed to the right-hand end together. */
+.geb-toolbar-tail {
+	display: flex;
+	gap: var(--size-4-2);
+	align-items: center;
+	margin-left: auto;
+	min-width: 0;
+}
+
 .geb-status {
 	margin-left: auto;
 	color: var(--text-muted);
@@ -120,6 +129,14 @@
 	stroke-dasharray: 2 2;
 }
 
+/* The control-point hull: the area where the fit is trusted. Stroke width and dashes are set by
+   the adapter in image units, as for the graticule. */
+.geb-hull {
+	fill: none;
+	stroke: var(--text-accent);
+	stroke-opacity: 0.7;
+}
+
 .geb-pin-uncertainty {
 	fill: var(--interactive-accent);
 	fill-opacity: 0.12;
@@ -156,6 +173,82 @@
 
 .geb-readout:empty {
 	display: none;
+}
+
+/* Guidance over a new map. It ignores the pointer, so the first tap lands on the map beneath. */
+.geb-banner {
+	position: absolute;
+	top: var(--size-4-2);
+	left: 50%;
+	transform: translateX(-50%);
+	max-width: calc(100% - 2 * var(--size-4-4));
+	padding: var(--size-2-2) var(--size-4-3);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary-alt);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	text-align: center;
+	pointer-events: none;
+}
+
+/* The key to the overlay. Its symbols reuse the overlay's own classes. */
+.geb-legend {
+	position: absolute;
+	right: var(--size-4-2);
+	bottom: var(--size-4-2);
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-1);
+	padding: var(--size-2-2) var(--size-4-2);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	pointer-events: none;
+}
+
+.geb-legend-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-1);
+}
+
+.geb-legend-symbol {
+	flex: 0 0 auto;
+	overflow: visible;
+}
+
+/* --- The dialogs ----------------------------------------------------------------------------- */
+
+.geb-report dl {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	gap: var(--size-2-1) var(--size-4-3);
+}
+
+.geb-report dt {
+	color: var(--text-muted);
+}
+
+.geb-report dd {
+	margin: 0;
+	font-variant-numeric: tabular-nums;
+}
+
+.geb-report table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: var(--font-ui-small);
+	font-variant-numeric: tabular-nums;
+}
+
+.geb-report th,
+.geb-report td {
+	padding: var(--size-2-1) var(--size-4-1);
+	text-align: left;
+	border-bottom: 1px solid var(--background-modifier-border);
 }
 
 /* Covers the viewport rather than replacing it, so the viewport keeps a measurable size while a

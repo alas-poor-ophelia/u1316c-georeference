@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { FitInfo, PinInfo } from "../src/api/types";
+import { COPY } from "../src/view/copy";
 import { coordinate, shortfall, trust } from "../src/view/format";
 import { chooseStep, graticule, label, ticks } from "../src/view/graticule";
 import { extrapolated, pinAt, uncertaintyRadius } from "../src/view/pins";
@@ -330,6 +331,26 @@ describe("the readout and the trust summary", () => {
 		expect(many.summary).toContain("+2 more");
 		// The full list is still available to a caller that wants to render all of them.
 		expect(many.notes).toEqual(["the fit is wrong", "b", "c"]);
+	});
+
+	test("told the recommended count, the summary says how far short it is and the hull note goes last", () => {
+		const short = trust(fit({ notes: ["the fit is wrong"] }, 3), 8);
+		expect(short.summary.startsWith(`tps, 3 points ${COPY.recommendedSuffix(8)} · `)).toBe(true);
+		expect(short.notes).toEqual(["the fit is wrong", COPY.spreadNote]);
+		// The leading caveat still leads; the view's own note is counted, not shown.
+		expect(short.summary).toContain("the fit is wrong (+1 more)");
+		const enough = trust(fit({}, 8), 8);
+		expect(enough.summary.startsWith("tps, 8 points · ")).toBe(true);
+		expect(enough.notes).toEqual([COPY.spreadNote]);
+		// Without it the summary is the kernel's alone, as before.
+		expect(trust(fit({}, 3)).notes).toEqual([]);
+	});
+
+	test("a polynomial short of the recommended count is barely determined; a spline is not", () => {
+		const poly = (n: number): FitInfo => ({ ...fit({}, n), model: "polynomial2" });
+		expect(trust(poly(6), 8).notes).toEqual([COPY.barelyDetermined(6, 8), COPY.spreadNote]);
+		expect(trust(poly(8), 8).notes).toEqual([COPY.spreadNote]);
+		expect(trust(fit({}, 6), 8).notes).toEqual([COPY.spreadNote]);
 	});
 
 	test("shortfall says how many more points the model wants", () => {

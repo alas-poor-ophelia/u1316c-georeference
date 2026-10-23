@@ -27,3 +27,12 @@ test/live/geb-live/.obsidian/*
 !test/live/geb-live/.obsidian/community-plugins.json
 test/live/geb-live/.trash/
 test/live/screenshots/
+
+# Throwaway measurement material (fixture pipelines, kernel probes). Never part of the tree.
+.scratch/
+
+# Hand-test fixtures copied into the live vault from test/user: the Britain image has no licence to
+# publish under, so neither folder is tracked. The gate leaves them alone (it sweeps only its own).
+test/live/geb-live/britain-5c/
+test/live/geb-live/uk-relief/
+test/user/

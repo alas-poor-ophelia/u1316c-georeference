@@ -27,6 +27,7 @@
  */
 import type { App, WorkspaceLeaf } from "obsidian";
 import type { ControlPoint, GebAPI, TransformKind } from "../src/api/types";
+import { COPY } from "../src/view/copy";
 
 const REPO = `${import.meta.dir}/..`;
 const VAULT_NAME = "geb-live";
@@ -119,7 +120,10 @@ const fitted = (what) => {
 	const info = { what, complete: img.complete, naturalWidth: img.naturalWidth, src: (img.getAttribute('src') || '').slice(0, 80), vp: [Math.round(vp.width), Math.round(vp.height)], scale: s.scale, expected };
 	if (!img.complete || img.naturalWidth !== 240) throw new Error(what + ': image not decoded ' + JSON.stringify(info));
 	if (vp.height < 200) throw new Error(what + ': viewport not laid out ' + JSON.stringify(info));
-	if (Math.abs(s.scale - expected) > 1e-6) throw new Error(what + ': not fitted to the container ' + JSON.stringify(info));
+	// The scale is read back from the stage's serialised CSS transform, which Chromium writes with
+	// about six significant digits (3.84424 for 3.84423828125). A tolerance finer than that only
+	// passed while the viewport height happened to be a whole number of pixels.
+	if (Math.abs(s.scale - expected) > 1e-4) throw new Error(what + ': not fitted to the container ' + JSON.stringify(info));
 	return info;
 };
 `;
@@ -272,11 +276,17 @@ async function resetFixture(): Promise<void> {
 		for (const m of qa(".modal-container")) m.remove();
 		const folder = app.vault.getFolderByPath("maps");
 		if (folder !== null) await app.fileManager.trashFile(folder);
+		// ONLY what a run of this gate can create: its note folder above, and the "Untitled" note a
+		// stray click on the explorer's new-note button leaves at the root. This used to trash every
+		// file that was not a fixture, and on 2026-10-22 that swept two folders of hand-test material
+		// the Guildmaster had copied into the vault, with no error and no notice. A harness that
+		// shares a vault with a person must never delete what it did not write.
 		for (const f of app.vault.getFiles()) {
-			if (!keep.includes(f.path) && !f.path.startsWith("maps/")) await app.fileManager.trashFile(f);
+			if (!keep.includes(f.path) && /^Untitled( \d+)?\.md$/.test(f.path)) await app.fileManager.trashFile(f);
 		}
 		await until("the note to be gone", () => app.vault.getAbstractFileByPath(notePath) === null, 5000);
-		await until("the index to drop it", () => api().listGeorefs().length === 0, 10_000);
+		// ITS OWN note only: the vault may hold other maps, the hand-test fixtures among them.
+		await until("the index to drop it", () => !api().listGeorefs().some((g) => g.notePath === notePath), 10_000);
 	}, { notePath: NOTE_PATH, keep: FIXTURE_FILES });
 }
 
@@ -296,7 +306,8 @@ const CHECKS: readonly Check[] = [
 				if (a.apiVersion !== 1) throw new Error(`apiVersion ${String(a.apiVersion)}`);
 				if (!a.ready) throw new Error("not ready");
 				if (a.minPoints.tps !== 3) throw new Error("minPoints missing");
-				if (a.listGeorefs().length !== 0) throw new Error("fixture not clean");
+				// Clean means the gate's OWN note is absent; other maps in the vault are not its business.
+				if (a.listGeorefs().some((g) => g.notePath === "maps/live/map.md")) throw new Error("fixture not clean");
 				const f = a.listFeatures().map((x) => x.notePath);
 				if (!f.includes("places/Alpha.md")) throw new Error(`place note not indexed: ${f.join(", ")}`);
 				return `ready, ${f.length} place note(s)`;
@@ -368,7 +379,7 @@ const CHECKS: readonly Check[] = [
 						setInput(inputs[4]!, p.label);
 						q(".modal-container button.mod-cta")!.click();
 						await until("the dialog to close", () => q(".modal-container") === null);
-						await until(`${i + 1} marker(s)`, () => qa(".geb-cp").length === i + 1);
+						await until(`${i + 1} marker(s)`, () => qa(".geb-overlay .geb-cp").length === i + 1);
 						placed.push(`${p.label}@${gotPx.toFixed(1)},${gotPy.toFixed(1)}`);
 					}
 					const status = q(".geb-status")!.textContent ?? "";
@@ -417,6 +428,28 @@ const CHECKS: readonly Check[] = [
 			),
 	},
 	{
+		name: "the doors: a ribbon icon lists the maps, and a georeference note's header action opens its map",
+		run: () =>
+			inWindow(
+				async ({ notePath, id }: { notePath: string; id: string }) => {
+					if (q('.side-dock-ribbon-action[aria-label="Open maps"]') === null) throw new Error("no ribbon icon");
+					const file = app.vault.getFileByPath(notePath);
+					if (file === null) throw new Error("the saved note is missing");
+					const noteLeaf = app.workspace.getLeaf(true);
+					await noteLeaf.openFile(file);
+					await until("the note's header action", () => q('.view-action[aria-label="Open map"]') !== null);
+					// From a closed map, so the action is seen to OPEN one rather than reveal one.
+					for (const l of app.workspace.getLeavesOfType("geb-georef")) l.detach();
+					q('.view-action[aria-label="Open map"]')!.click();
+					await until("the map leaf", () => gebLeaf() !== null);
+					await until("the leaf to take its state", () => leafState().georefId === id);
+					noteLeaf.detach();
+					return "ribbon icon present; the note's header action opened its map";
+				},
+				{ notePath: NOTE_PATH, id: GEOREF_ID },
+			),
+	},
+	{
 		name: "a place note lands on the map as a pin at the pixel the fixture rule predicts",
 		run: () =>
 			inWindow(
@@ -426,9 +459,10 @@ const CHECKS: readonly Check[] = [
 					if (alpha === undefined) throw new Error(`Alpha not on the map: ${JSON.stringify(pins)}`);
 					// Alpha is lat 56, lng -4: pixel (60, 40) under the rule.
 					if (Math.abs(alpha.x - 60) > 1e-6 || Math.abs(alpha.y - 40) > 1e-6) throw new Error(`Alpha at ${alpha.x}, ${alpha.y}`);
-					await until("the pin to be drawn", () => qa(".geb-pin").length === 1);
-					const label = qa(".geb-pin-label")[0]?.textContent;
-					if (label !== "Alpha") throw new Error(`pin label ${label ?? "(none)"}`);
+					// ALPHA'S pin, not "the one pin": the fixture rule covers all of Britain, so any
+					// hand-test place notes sharing the vault land on this map too, and rightly.
+					const alphaDrawn = (): boolean => qa(".geb-overlay .geb-pin-label").some((l) => l.textContent === "Alpha");
+					await until("the Alpha pin to be drawn", alphaDrawn);
 					return `Alpha at (${alpha.x}, ${alpha.y}), extrapolated=${String(alpha.extrapolated)}`;
 				},
 				{ id: GEOREF_ID },
@@ -441,7 +475,7 @@ const CHECKS: readonly Check[] = [
 				async ({ id, points }: { id: string; points: readonly FixturePoint[] }) => {
 					buttonNamed("Edit", ".geb-toolbar")!.click();
 					await until("the edit bar", () => q(".geb-edit-bar")!.style.display !== "none");
-					await until("markers", () => qa(".geb-cp").length === 4);
+					await until("markers", () => qa(".geb-overlay .geb-cp").length === 4);
 					const before = api().getFit(id).points[0]!;
 					const s = stage();
 					const p0 = points[0]!;
@@ -469,7 +503,7 @@ const CHECKS: readonly Check[] = [
 					buttonNamed("Save", ".geb-edit-bar")!.click();
 					await until("the fit to reload from the vault", () => Math.abs(api().getFit(id).points[0]!.px - expect.px) < 1, 15_000);
 					await until("the edit bar to hide", () => q(".geb-edit-bar")!.style.display === "none");
-					await until("markers to clear", () => qa(".geb-cp").length === 0);
+					await until("markers to clear", () => qa(".geb-overlay .geb-cp").length === 0);
 					const after = api().getFit(id);
 					if (!(after.diagnostics.affineRms > 1)) throw new Error(`moving a point should have cost residual; RMS ${after.diagnostics.affineRms}`);
 					const a0 = after.points[0]!;
@@ -482,15 +516,15 @@ const CHECKS: readonly Check[] = [
 		name: "a dirty draft survives the leaf being closed and reopened from its layout state, and Discard reverts it",
 		run: () =>
 			inWindow(
-				async ({ id }) => {
+				async ({ id, confirm }) => {
 					buttonNamed("Edit", ".geb-toolbar")!.click();
-					await until("markers", () => qa(".geb-cp").length === 4);
+					await until("markers", () => qa(".geb-overlay .geb-cp").length === 4);
 					const p3 = api().getFit(id).points[3]!;
 					const at = toScreen(p3.px, p3.py);
 					await click(at.x, at.y);
-					await until("a selected marker", () => qa(".geb-cp-selected").length === 1);
+					await until("a selected marker", () => qa(".geb-overlay .geb-cp-selected").length === 1);
 					buttonNamed("Delete point", ".geb-edit-bar")!.click();
-					await until("3 markers", () => qa(".geb-cp").length === 3);
+					await until("3 markers", () => qa(".geb-overlay .geb-cp").length === 3);
 					const saved = gebLeaf()!.getViewState();
 					if ((saved.state as LeafState).draft?.points.length !== 3) throw new Error(`layout state ${JSON.stringify(saved.state)}`);
 					gebLeaf()!.detach();
@@ -498,17 +532,21 @@ const CHECKS: readonly Check[] = [
 					const leaf = app.workspace.getLeaf(true);
 					await leaf.setViewState({ type: saved.type, state: saved.state ?? {}, active: true });
 					await until("the restored leaf", () => gebLeaf() !== null);
-					await until("3 restored markers", () => qa(".geb-cp").length === 3, 15_000);
+					await until("3 restored markers", () => qa(".geb-overlay .geb-cp").length === 3, 15_000);
 					const status = q(".geb-status")!.textContent ?? "";
 					if (!/3 points/.test(status) || !/unsaved/.test(status)) throw new Error(`restored status "${status}"`);
 					buttonNamed("Discard", ".geb-edit-bar")!.click();
-					await until("markers to clear", () => qa(".geb-cp").length === 0);
+					// A dirty draft asks first; the markers must still be there while it asks.
+					await until("the discard confirmation", () => buttonNamed(confirm, ".modal") !== null);
+					if (qa(".geb-overlay .geb-cp").length !== 3) throw new Error("Discard acted before it was confirmed");
+					buttonNamed(confirm, ".modal")!.click();
+					await until("markers to clear", () => qa(".geb-overlay .geb-cp").length === 0);
 					await until("the edit bar to hide", () => q(".geb-edit-bar")!.style.display === "none");
 					if (api().getFit(id).pointCount !== 4) throw new Error("Discard wrote something");
 					if (leafState().draft !== undefined) throw new Error("the layout still carries a draft after Discard");
-					return `restored 3-point draft, status "${status}", discarded`;
+					return `restored 3-point draft, status "${status}", confirmed and discarded`;
 				},
-				{ id: GEOREF_ID },
+				{ id: GEOREF_ID, confirm: COPY.discard.confirm },
 			),
 	},
 	{

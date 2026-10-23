@@ -6,8 +6,11 @@
  * so that a value the API would refuse is refused beside the field it was typed into, with the
  * reason, rather than after a click with a notice. The API's own validation still runs on save.
  */
-import { type App, FuzzySuggestModal, Modal, Setting, type TextComponent } from "obsidian";
-import type { ControlPoint, FeatureInfo, GebAPI } from "../api/types";
+import { type App, FuzzySuggestModal, Modal, Notice, Setting, type TextComponent } from "obsidian";
+import type { ControlPoint, FeatureInfo, GebAPI, GeorefSummary } from "../api/types";
+import { COPY } from "./copy";
+import { parsePair } from "./coords";
+import { readPointForm } from "./pointform";
 
 /** What `PointModal` starts from: a pixel always, a coordinate when editing an existing point. */
 export interface PointDraft {
@@ -44,8 +47,8 @@ export class PointModal extends Modal {
 		this.field("py", "Pixel y", numberText(this.initial.py));
 		// Coordinates at FULL precision: three decimals of latitude is a hundred metres, and a
 		// user opening this dialog to fix a label must not have the coordinate rounded under them.
-		this.field("lat", "Latitude", exactText(this.initial.lat), "Decimal degrees; south is negative.");
-		this.field("lng", "Longitude", exactText(this.initial.lng), "Decimal degrees; west is negative.");
+		this.field("lat", "Latitude", exactText(this.initial.lat), COPY.coords.latHint);
+		this.field("lng", "Longitude", exactText(this.initial.lng), COPY.coords.lngHint);
 		this.field("label", "Label", this.initial.label ?? "", "Optional. Shown beside the marker and named in the residuals.");
 
 		new Setting(contentEl)
@@ -82,6 +85,13 @@ export class PointModal extends Modal {
 				// Not while an input method is composing: that Enter commits the composition.
 				if (e.key === "Enter" && !e.isComposing) this.submit();
 			});
+			// A PASTED pair fills both fields. On the paste event only, never on input: wired to
+			// every keystroke it fired at "51 3" and overwrote the longitude a user was typing.
+			if (key === "lat") {
+				t.inputEl.addEventListener("paste", (e) => {
+					if (this.splitPair(e.clipboardData?.getData("text") ?? "")) e.preventDefault();
+				});
+			}
 			this.inputs.set(key, t);
 		});
 	}
@@ -103,25 +113,31 @@ export class PointModal extends Modal {
 	}
 
 	private submit(): void {
-		const px = this.number("px");
-		const py = this.number("py");
-		const lat = this.number("lat");
-		const lng = this.number("lng");
-		const label = this.inputs.get("label")?.getValue().trim() ?? "";
-		const bad = (why: string): void => this.errorEl?.setText(why);
-
-		if (px === null || py === null) return bad("Pixel x and y must be numbers.");
-		if (px < 0 || py < 0) return bad("Pixel x and y cannot be negative.");
-		if (lat === null || lng === null) return bad("Latitude and longitude must be numbers, in decimal degrees.");
-		const crs = this.crsInfo();
-		if (crs !== null) {
-			const [latLo, latHi] = crs.latRange;
-			const [lngLo, lngHi] = crs.lngRange;
-			if (lat < latLo || lat > latHi) return bad(`Latitude must be between ${latLo} and ${latHi} for ${crs.name}.`);
-			if (lng < lngLo || lng > lngHi) return bad(`Longitude must be between ${lngLo} and ${lngHi} for ${crs.name}.`);
-		}
-		this.onSubmit(label === "" ? { px, py, lat, lng } : { px, py, lat, lng, label });
+		const text = (key: Field): string => this.inputs.get(key)?.getValue() ?? "";
+		const read = readPointForm(
+			{ px: text("px"), py: text("py"), lat: text("lat"), lng: text("lng"), label: text("label") },
+			this.crsInfo(),
+		);
+		if (!read.ok) return this.errorEl?.setText(read.error);
+		this.onSubmit(read.point);
 		this.close();
+	}
+
+	/**
+	 * A pair pasted into the latitude field is split across both. `parsePair` is null for a single
+	 * number, so typing "51.5074" never fires this; it runs once, on the paste that completes a pair.
+	 */
+	/** Fill both fields from pasted text holding a pair. True when it did, so the paste is consumed. */
+	private splitPair(text: string): boolean {
+		const lat = this.inputs.get("lat");
+		const lng = this.inputs.get("lng");
+		if (lat === undefined || lng === undefined || lng.getValue().trim() !== "") return false;
+		const pair = parsePair(text);
+		if (pair === null) return false;
+		lat.setValue(String(pair.lat));
+		lng.setValue(String(pair.lng));
+		new Notice(COPY.coords.pairFilled);
+		return true;
 	}
 
 	private crsInfo(): { readonly name: string; readonly latRange: readonly [number, number]; readonly lngRange: readonly [number, number] } | null {
@@ -130,14 +146,6 @@ export class PointModal extends Modal {
 		} catch {
 			return null;
 		}
-	}
-
-	/** A finite number from the field, or null. Accepts a decimal comma: a European keyboard is not a typo. */
-	private number(key: Field): number | null {
-		const raw = this.inputs.get(key)?.getValue().trim().replace(",", ".") ?? "";
-		if (raw === "" || !/^[-+]?(\d+\.?\d*|\.\d+)$/.test(raw)) return null;
-		const n = Number(raw);
-		return Number.isFinite(n) ? n : null;
 	}
 }
 
@@ -193,11 +201,11 @@ export class CreateGeorefModal extends Modal {
 		this.titleEl.setText("Georeference this image");
 		new Setting(contentEl)
 			.setName("Georeference ID")
-			.setDesc("How other notes and plugins will refer to this map. Cannot be changed later without editing the note.")
+			.setDesc(COPY.create.idHint)
 			.addText((t) => t.setValue(this.id).onChange((v) => (this.id = v)));
 		new Setting(contentEl)
 			.setName("Note path")
-			.setDesc("Where the georeference note is created. The image itself is not moved or changed.")
+			.setDesc(COPY.create.notePathHint)
 			.addText((t) => t.setValue(this.notePath).onChange((v) => (this.notePath = v)));
 		this.errorEl = contentEl.createDiv({ cls: "geb-form-error" });
 		new Setting(contentEl).addButton((b) =>
@@ -239,4 +247,28 @@ function exactText(n: number | undefined): string {
 function basename(path: string): string {
 	const file = path.slice(path.lastIndexOf("/") + 1);
 	return file.endsWith(".md") ? file.slice(0, -3) : file;
+}
+
+/** Every loaded map, for the ribbon icon and the "Open maps" command. */
+export class MapPicker extends FuzzySuggestModal<GeorefSummary> {
+	constructor(
+		app: App,
+		private readonly items: readonly GeorefSummary[],
+		private readonly onPick: (g: GeorefSummary) => void,
+	) {
+		super(app);
+		this.setPlaceholder(COPY.doors.placeholder);
+	}
+
+	getItems(): GeorefSummary[] {
+		return [...this.items];
+	}
+
+	getItemText(g: GeorefSummary): string {
+		return g.id + "  " + g.notePath;
+	}
+
+	onChooseItem(g: GeorefSummary): void {
+		this.onPick(g);
+	}
 }

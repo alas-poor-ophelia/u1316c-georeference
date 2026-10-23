@@ -1,10 +1,11 @@
-import { debounce, normalizePath, Notice, Plugin, TFile, type Debouncer, type EventRef } from "obsidian";
+import { debounce, FileView, MarkdownView, normalizePath, Notice, Plugin, TFile, type Debouncer, type EventRef, type View } from "obsidian";
 import { ApiController } from "../api/controller";
 import type { GebAPI } from "../api/types";
 import { reconcile, type ReconcileOutcome } from "../persist/reconcile";
 import { handleRename } from "../persist/rename";
 import type { VaultPort } from "../persist/types";
-import { CreateGeorefModal, type CreateChoice } from "../view/modals";
+import { COPY } from "../view/copy";
+import { CreateGeorefModal, MapPicker, type CreateChoice } from "../view/modals";
 import type { CreateSource } from "../view/shell";
 import { GeorefView, VIEW_TYPE } from "../view/view";
 import { IMAGE_EXTENSIONS, ObsidianVault } from "./vault-adapter";
@@ -74,22 +75,33 @@ export default class GebPlugin extends Plugin {
 			name: "Georeference this image",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
-				if (file === null || !isImage(file) || this.api?.ready !== true) return false;
-				if (!checking) void this.georeference(file);
+				if (file === null || !isImage(file)) return false;
+				if (!checking) this.offerGeoreference(file);
 				return true;
 			},
 		});
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
-				if (!(file instanceof TFile) || !isImage(file) || this.api?.ready !== true) return;
+				if (!(file instanceof TFile) || !isImage(file)) return;
 				menu.addItem((item) =>
 					item
 						.setTitle("Georeference this image")
 						.setIcon("map")
-						.onClick(() => void this.georeference(file)),
+						.onClick(() => this.offerGeoreference(file)),
 				);
 			}),
 		);
+
+		// VISIBLE DOORS. Until these, the only ways to a map were two palette commands, and a vault
+		// of georeference notes looked like a vault of plain notes: the Guildmaster copied two
+		// fixtures in and saw "no evidence of the plugin at all". A ribbon icon lists the maps, a
+		// georeference note gets a header action that opens its map, and an image gets one that
+		// georeferences it or opens the map it already has.
+		this.addRibbonIcon("map", COPY.doors.ribbon, () => this.openMaps());
+		this.addCommand({ id: "open-maps", name: COPY.doors.command, callback: () => this.openMaps() });
+		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.refreshActions()));
+		this.registerEvent(this.app.workspace.on("file-open", () => this.refreshActions()));
+		this.registerEvent(this.app.workspace.on("layout-change", () => this.refreshActions()));
 
 		// Geb owns rename handling outright: the metadata cache's `changed` event explicitly does
 		// not fire on rename, so this is the only notification there is.
@@ -111,6 +123,7 @@ export default class GebPlugin extends Plugin {
 			const declareReady = (): void => {
 				this.controller?.markReady();
 				this.app.workspace.trigger("geb:ready");
+				this.refreshActions();
 				// REGISTERED ONLY NOW, after the cache has resolved. Obsidian fires `changed` once
 				// per file while indexing — 50,000 of them on a large vault — and every one would
 				// be an invalidation of an index the first build is about to make anyway.
@@ -158,11 +171,66 @@ export default class GebPlugin extends Plugin {
 	}
 
 	/** The id of the georeference the active note holds, through the public API, or null. */
-	private georefIdOfActiveFile(): string | null {
+	/** The list of maps, or a nudge toward making the first one. */
+	private openMaps(): void {
 		const api = this.api;
+		if (api === null || !api.ready) {
+			new Notice(COPY.notReady);
+			return;
+		}
+		const maps = api.listGeorefs();
+		if (maps.length === 0) {
+			new Notice(COPY.doors.none);
+			return;
+		}
+		new MapPicker(this.app, maps, (g) => void this.openView(g.id)).open();
+	}
+
+	/**
+	 * Header actions, one per open file view that qualifies: a note that is a loaded map, or an
+	 * image. Keyed by what the action would do, because a markdown view is reused for file after
+	 * file — an action added for one note must not survive into the next.
+	 */
+	private readonly actions = new WeakMap<View, { readonly key: string; readonly el: HTMLElement }>();
+
+	private refreshActions(): void {
+		if (!this.alive) return;
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			const view = leaf.view;
+			if (!(view instanceof FileView)) return;
+			const wanted = view.file === null ? null : this.actionFor(view, view.file);
+			const current = this.actions.get(view);
+			if (current !== undefined && (wanted === null || wanted.key !== current.key)) {
+				current.el.remove();
+				this.actions.delete(view);
+			}
+			if (wanted !== null && (current === undefined || wanted.key !== current.key)) {
+				this.actions.set(view, { key: wanted.key, el: view.addAction("map", wanted.title, wanted.run) });
+			}
+		});
+	}
+
+	private actionFor(view: FileView, file: TFile): { readonly key: string; readonly title: string; readonly run: () => void } | null {
+		if (view instanceof MarkdownView) {
+			const id = this.georefIdOfNote(file.path);
+			return id === null ? null : { key: "note:" + id, title: COPY.doors.note, run: () => void this.openView(id) };
+		}
+		if (view.getViewType() === "image" && isImage(file)) {
+			return { key: "image:" + file.path, title: COPY.doors.image, run: () => this.offerGeoreference(file) };
+		}
+		return null;
+	}
+
+	/** The id of the loaded georeference stored in the note at `path`, or null. */
+	private georefIdOfNote(path: string): string | null {
+		const api = this.api;
+		if (api === null || !api.ready) return null;
+		return api.listGeorefs().find((g) => g.notePath === path)?.id ?? null;
+	}
+
+	private georefIdOfActiveFile(): string | null {
 		const file = this.app.workspace.getActiveFile();
-		if (api === null || !api.ready || file === null) return null;
-		return api.listGeorefs().find((g) => g.notePath === file.path)?.id ?? null;
+		return file === null ? null : this.georefIdOfNote(file.path);
 	}
 
 	/** The id of the loaded georeference whose image is `path`, through the public API, or null. */
@@ -175,6 +243,15 @@ export default class GebPlugin extends Plugin {
 			}
 		}
 		return null;
+	}
+
+	/** The entry for an image: always offered, and before the vault is indexed it says so rather than vanish. */
+	private offerGeoreference(file: TFile): void {
+		if (this.api?.ready !== true) {
+			new Notice(COPY.notReady);
+			return;
+		}
+		void this.georeference(file);
 	}
 
 	/**

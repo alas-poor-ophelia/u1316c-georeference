@@ -21,7 +21,7 @@ const obsidianForSrc = obsidianmd.configs.recommended.map((c) => {
 
 export default tseslint.config(
 	{
-		ignores: ["node_modules/**", ".claude/**", "main.js", "test/live/geb-live/.obsidian/**", "**/*.json", "**/*.mjs", "**/*.cjs", "docs/**"],
+		ignores: ["node_modules/**", ".claude/**", ".scratch/**", "main.js", "test/live/geb-live/.obsidian/**", "**/*.json", "**/*.mjs", "**/*.cjs", "docs/**"],
 	},
 	...obsidianForSrc,
 	...tseslint.configs.recommendedTypeChecked,

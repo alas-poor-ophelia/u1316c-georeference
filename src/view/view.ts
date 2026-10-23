@@ -25,8 +25,10 @@
  * for a coordinate; the shell says so, this file opens the modal, and the answer goes back to the
  * shell as one call. The shell never waits on anything the DOM does.
  */
-import { ItemView, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
 import type { ControlPoint, GebAPI, Pixel, TransformKind } from "../api/types";
+import { COPY } from "./copy";
+import { ConfirmModal, discardPrompt, FitReportModal, ModelsModal } from "./dialogs";
 import { PointModal } from "./modals";
 import {
 	MapShell,
@@ -59,6 +61,12 @@ const CP_HALF = 5;
 /** Wheel `deltaMode` 1 (lines) and 2 (pages) scaled to pixels, so a notch means the same everywhere. */
 const DELTA_LINE_PX = 16;
 const DELTA_PAGE_PX = 400;
+/** The hull's dash and gap, in CSS pixels; scaled into image units like the hairline. */
+const HULL_DASH = 6;
+const HULL_GAP = 4;
+/** Long enough to reach Undo after reading the notice, short enough not to linger. */
+const UNDO_NOTICE_MS = 8000;
+const EDIT_TIP = "Edit the control points";
 
 const MODELS: readonly { readonly kind: TransformKind; readonly name: string }[] = [
 	{ kind: "affine", name: "Affine" },
@@ -71,6 +79,7 @@ interface Painted {
 	pins: Frame["pins"];
 	lines: Frame["lines"];
 	controlPoints: Frame["controlPoints"];
+	hull: Frame["hull"];
 	edit: Frame["edit"];
 	scale: number;
 	viewport: Frame["viewport"];
@@ -101,8 +110,18 @@ export class GeorefView extends ItemView implements Surface {
 	private deletePointBtn: HTMLButtonElement | null = null;
 	private saveBtn: HTMLButtonElement | null = null;
 	private discardBtn: HTMLButtonElement | null = null;
+	private reportBtn: HTMLButtonElement | null = null;
+	private bannerEl: HTMLElement | null = null;
+	private legendEl: HTMLElement | null = null;
+	/** The one live undo notice: the shell holds a single undo slot, so an older notice must not outlive it. */
+	private undoNotice: Notice | null = null;
 	/** What the overlay and stage were last built from, so a repaint can skip what did not move. */
 	private painted: Painted | null = null;
+	/**
+	 * The frame painted last. The shell paints synchronously inside each call, so after a
+	 * `deletePoint` this is the frame that carries the deleted point's label.
+	 */
+	private lastFrame: Frame | null = null;
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -184,6 +203,7 @@ export class GeorefView extends ItemView implements Surface {
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		this.painted = null;
+		this.lastFrame = null;
 		this.viewportEl = null;
 		this.stageEl = null;
 		this.imageEl = null;
@@ -199,6 +219,9 @@ export class GeorefView extends ItemView implements Surface {
 		this.deletePointBtn = null;
 		this.saveBtn = null;
 		this.discardBtn = null;
+		this.reportBtn = null;
+		this.bannerEl = null;
+		this.legendEl = null;
 		return Promise.resolve();
 	}
 
@@ -212,6 +235,7 @@ export class GeorefView extends ItemView implements Surface {
 		this.shell?.close();
 		this.shell = null;
 		this.painted = null;
+		this.lastFrame = null;
 		if (this.georefId === "") {
 			this.message("Open this view from a georeference note, or georeference an image.");
 			return;
@@ -247,7 +271,7 @@ export class GeorefView extends ItemView implements Surface {
 		button(toolbar, "+", "Zoom in", () => this.shell?.zoomIn());
 		button(toolbar, "−", "Zoom out", () => this.shell?.zoomOut());
 		button(toolbar, "Fit", "Fit the whole map in the view", () => this.shell?.fitImage());
-		this.editBtn = button(toolbar, "Edit", "Edit the control points", () => this.shell?.beginEdit());
+		this.editBtn = button(toolbar, "Edit", EDIT_TIP, () => this.shell?.beginEdit());
 
 		const bar = toolbar.createSpan({ cls: "geb-edit-bar" });
 		this.editBar = bar;
@@ -255,13 +279,19 @@ export class GeorefView extends ItemView implements Surface {
 		for (const m of MODELS) select.createEl("option", { text: m.name, value: m.kind });
 		this.registerDomEvent(select, "change", () => this.shell?.setModel(select.value as TransformKind));
 		this.modelSelect = select;
+		button(bar, COPY.models.button, COPY.models.tip, () => new ModelsModal(this.app, MODELS).open());
 		this.editPointBtn = button(bar, "Edit point…", "Change the selected point's coordinate", () => this.editSelected());
 		this.deletePointBtn = button(bar, "Delete point", "Remove the selected point", () => this.deleteSelected());
 		this.saveBtn = button(bar, "Save", "Write the control points to the georeference note", () => void this.shell?.save());
-		this.discardBtn = button(bar, "Discard", "Drop the unsaved changes", () => this.shell?.discardEdit());
+		this.discardBtn = button(bar, "Discard", "Drop the unsaved changes", () => this.discard());
 		bar.hide();
 
-		this.statusEl = toolbar.createSpan({ cls: "geb-status" });
+		// Details and the status travel together at the right-hand end, so the button sits beside
+		// the line it explains and the line still takes whatever room is left.
+		const tail = toolbar.createSpan({ cls: "geb-toolbar-tail" });
+		this.reportBtn = button(tail, COPY.report.button, COPY.report.tip, () => this.openReport());
+		this.reportBtn.hide();
+		this.statusEl = tail.createSpan({ cls: "geb-status" });
 
 		const vp = root.createDiv({ cls: "geb-viewport" });
 		this.viewportEl = vp;
@@ -269,6 +299,11 @@ export class GeorefView extends ItemView implements Surface {
 		this.imageEl = this.stageEl.createEl("img", { cls: "geb-image", attr: { alt: "" } });
 		this.overlayEl = this.stageEl.createSvg("svg", { cls: "geb-overlay" });
 		this.readoutEl = vp.createDiv({ cls: "geb-readout" });
+		// Over the map but never in its way: both ignore the pointer, so a tap through them lands.
+		this.bannerEl = vp.createDiv({ cls: "geb-banner" });
+		this.bannerEl.hide();
+		this.legendEl = this.buildLegend(vp);
+		this.legendEl.hide();
 		// Inside the viewport, over the stage: the viewport keeps its size while a message shows.
 		this.messageEl = vp.createDiv({ cls: "geb-message" });
 		this.messageEl.hide();
@@ -282,6 +317,49 @@ export class GeorefView extends ItemView implements Surface {
 		this.resizeObserver.observe(vp);
 
 		this.wirePointer(vp);
+	}
+
+	/**
+	 * The key to the overlay, built once. Each symbol carries the overlay's own classes, so a
+	 * theme that recolours a pin or a marker recolours its legend entry with it.
+	 */
+	private buildLegend(vp: HTMLElement): HTMLElement {
+		const legend = vp.createDiv({ cls: "geb-legend" });
+		const row = (text: string, draw: (svg: SVGSVGElement) => void): void => {
+			const r = legend.createDiv({ cls: "geb-legend-row" });
+			const svg = r.createSvg("svg", { cls: "geb-legend-symbol" });
+			svg.setAttribute("width", "14");
+			svg.setAttribute("height", "14");
+			svg.setAttribute("viewBox", "-7 -7 14 14");
+			draw(svg);
+			r.createSpan({ text });
+		};
+		row(COPY.legend.control, (svg) => {
+			const mark = svg.createSvg("rect", { cls: "geb-cp" });
+			mark.setAttribute("x", String(-CP_HALF));
+			mark.setAttribute("y", String(-CP_HALF));
+			mark.setAttribute("width", String(2 * CP_HALF));
+			mark.setAttribute("height", String(2 * CP_HALF));
+		});
+		row(COPY.legend.place, (svg) => {
+			svg.createSvg("circle", { cls: "geb-pin" }).setAttribute("r", String(PIN_RADIUS));
+		});
+		row(COPY.legend.extrapolated, (svg) => {
+			const dot = svg.createSvg("circle");
+			dot.classList.add("geb-pin");
+			dot.classList.add("geb-extrapolated");
+			dot.setAttribute("r", String(PIN_RADIUS));
+		});
+		row(COPY.legend.hull, (svg) => {
+			const line = svg.createSvg("line", { cls: "geb-hull" });
+			line.setAttribute("x1", "-7");
+			line.setAttribute("y1", "0");
+			line.setAttribute("x2", "7");
+			line.setAttribute("y2", "0");
+			line.setAttribute("stroke-width", "1.5");
+			line.setAttribute("stroke-dasharray", "3 2");
+		});
+		return legend;
 	}
 
 	/**
@@ -404,9 +482,48 @@ export class GeorefView extends ItemView implements Surface {
 		this.askPoint(point, (p) => this.shell?.replacePoint(i, p));
 	}
 
+	/**
+	 * Immediate, because a confirmation on every delete teaches people to click through it; the
+	 * notice's Undo is the safety net instead. The shell paints inside `deletePoint`, so the frame
+	 * painted last is the one that names the point.
+	 */
 	private deleteSelected(): void {
 		const i = this.painted?.edit?.selected ?? null;
-		if (i !== null) this.shell?.deletePoint(i);
+		if (i === null) return;
+		this.shell?.deletePoint(i);
+		const label = this.lastFrame?.edit?.lastDeletedLabel ?? null;
+		if (label === null) return;
+		// A second delete replaces the undo slot, so the first notice's Undo would restore the
+		// SECOND point under the first point's name. Hide it.
+		this.undoNotice?.hide();
+		const notice = new Notice(
+			createFragment((f) => {
+				f.appendText(`${COPY.deleted(label)} `);
+				const undo = f.createEl("button", { text: COPY.undo });
+				undo.addEventListener("click", () => {
+					this.shell?.undoDelete();
+					notice.hide();
+				});
+			}),
+			UNDO_NOTICE_MS,
+		);
+		this.undoNotice = notice;
+	}
+
+	/** Ask first when there is work to lose; otherwise drop the draft as before. */
+	private discard(): void {
+		const edit = this.lastFrame?.edit ?? null;
+		const body = edit === null ? null : discardPrompt(edit);
+		if (body === null) {
+			this.shell?.discardEdit();
+			return;
+		}
+		new ConfirmModal(this.app, COPY.discard.title, body, COPY.discard.confirm, COPY.discard.cancel, () => this.shell?.discardEdit()).open();
+	}
+
+	private openReport(): void {
+		const report = this.lastFrame?.report ?? null;
+		if (report !== null) new FitReportModal(this.app, report).open();
 	}
 
 	// --- Surface -------------------------------------------------------------------------------
@@ -433,11 +550,16 @@ export class GeorefView extends ItemView implements Surface {
 
 	message(text: string): void {
 		this.painted = null;
+		this.lastFrame = null;
 		this.messageEl?.setText(text);
 		this.messageEl?.show();
 		this.stageEl?.hide();
 		this.readoutEl?.setText("");
 		this.statusEl?.setText("");
+		this.statusEl?.removeAttribute("title");
+		this.bannerEl?.hide();
+		this.legendEl?.hide();
+		this.reportBtn?.hide();
 		for (const b of this.buttons) b.disabled = true;
 		if (this.modelSelect !== null) this.modelSelect.disabled = true;
 		// The draft survives underneath, but its controls over a message would be a lie.
@@ -468,9 +590,11 @@ export class GeorefView extends ItemView implements Surface {
 		const { scale, offsetX, offsetY } = frame.viewport;
 		const draftChanged = prev === null || prev.controlPoints !== frame.controlPoints;
 		const editChanged = prev === null || prev.edit !== frame.edit;
-		const geometryChanged = prev === null || draftChanged || prev.src !== frame.image.src || prev.pins !== frame.pins || prev.lines !== frame.lines || prev.scale !== scale;
+		const geometryChanged =
+			prev === null || draftChanged || prev.src !== frame.image.src || prev.pins !== frame.pins || prev.lines !== frame.lines || prev.hull !== frame.hull || prev.scale !== scale;
 		const viewportChanged = prev === null || prev.viewport !== frame.viewport;
-		this.painted = { src: frame.image.src, pins: frame.pins, lines: frame.lines, controlPoints: frame.controlPoints, edit: frame.edit, scale, viewport: frame.viewport };
+		this.painted = { src: frame.image.src, pins: frame.pins, lines: frame.lines, controlPoints: frame.controlPoints, hull: frame.hull, edit: frame.edit, scale, viewport: frame.viewport };
+		this.lastFrame = frame;
 
 		if (prev === null || prev.src !== frame.image.src) img.src = frame.image.src;
 		if (viewportChanged) {
@@ -483,6 +607,15 @@ export class GeorefView extends ItemView implements Surface {
 		}
 		this.readoutEl?.setText(frame.readout);
 		this.statusEl?.setText(frame.status);
+		// The line ellipsizes in a narrow leaf; hovering it reads the whole thing.
+		this.statusEl?.setAttribute("title", frame.status);
+		if (frame.banner === null) this.bannerEl?.hide();
+		else {
+			this.bannerEl?.setText(frame.banner);
+			this.bannerEl?.show();
+		}
+		this.legendEl?.toggle(frame.hull.length > 0 || frame.pins.length > 0);
+		this.reportBtn?.toggle(frame.report !== null);
 		// EVERY paint, not only when the edit state moved: the first version re-enabled every
 		// button on each paint and synced the editor's enable states only on a change, so the
 		// first hover after any edit showed Save enabled on a clean draft.
@@ -514,6 +647,14 @@ export class GeorefView extends ItemView implements Surface {
 				text.setAttribute("dy", "-3");
 				text.textContent = line.label;
 			}
+		}
+		// The trusted area, over the graticule and under every pin and marker. In image pixels
+		// like the graticule, so its stroke and its dashes are scaled back to screen size.
+		if (frame.hull.length > 0) {
+			const hull = svg.createSvg("polygon", { cls: "geb-hull" });
+			hull.setAttribute("points", frame.hull.map((p) => `${p.x},${p.y}`).join(" "));
+			hull.setAttribute("stroke-width", String(1.5 / scale));
+			hull.setAttribute("stroke-dasharray", `${HULL_DASH / scale} ${HULL_GAP / scale}`);
 		}
 		for (const pin of frame.pins) {
 			if (pin.uncertaintyPx !== null) {
@@ -564,6 +705,7 @@ export class GeorefView extends ItemView implements Surface {
 	private syncToolbar(frame: Frame): void {
 		const edit = frame.edit;
 		for (const b of this.buttons) b.disabled = false;
+		this.editBtn?.setAttribute("title", frame.pending ? COPY.tips.editPending : EDIT_TIP);
 		if (edit === null) {
 			this.editBar?.hide();
 			this.editBtn?.show();
@@ -578,6 +720,8 @@ export class GeorefView extends ItemView implements Surface {
 		if (this.editPointBtn !== null) this.editPointBtn.disabled = noSelection;
 		if (this.deletePointBtn !== null) this.deletePointBtn.disabled = noSelection;
 		if (this.saveBtn !== null) this.saveBtn.disabled = edit.saving || !edit.fittable || !edit.dirty;
+		this.saveBtn?.setAttribute("title", edit.saveTip);
+		this.saveBtn?.setAttribute("aria-label", edit.saveTip);
 		if (this.discardBtn !== null) this.discardBtn.disabled = edit.saving;
 	}
 
