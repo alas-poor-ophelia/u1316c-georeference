@@ -44,6 +44,8 @@ export class FitReportModal extends Modal {
 	constructor(
 		app: App,
 		private readonly report: FitReport,
+		/** Reference files that could not be read, shown after the table. */
+		private readonly problems: readonly string[] = [],
 	) {
 		super(app);
 	}
@@ -75,6 +77,12 @@ export class FitReportModal extends Modal {
 		for (const row of report.rows) {
 			const tr = body.createEl("tr");
 			for (const cell of reportRowCells(row)) tr.createEl("td", { text: cell });
+		}
+
+		if (this.problems.length > 0) {
+			contentEl.createEl("h4", { text: COPY.reference.problems });
+			const ul = contentEl.createEl("ul");
+			for (const problem of this.problems) ul.createEl("li", { text: problem });
 		}
 	}
 
@@ -109,6 +117,9 @@ export class ModelsModal extends Modal {
 		}
 		contentEl.createEl("p", { text: COPY.models.spread });
 		contentEl.createEl("p", { text: COPY.models.rms });
+		const hint = contentEl.createEl("p", { text: COPY.reference.folderHint });
+		hint.createEl("br");
+		hint.createEl("code", { text: COPY.reference.download.command });
 	}
 
 	override onClose(): void {

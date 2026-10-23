@@ -9,7 +9,8 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { ApiController } from "../src/api/controller";
 import type { GebErrorCode } from "../src/api/errors";
-import { MIN_POINTS, type ControlPoint } from "../src/core/types";
+import { buildFit, toPixel } from "../src/core/fit";
+import { MIN_POINTS, type ControlPoint, type LatLng } from "../src/core/types";
 import { hashBytes } from "../src/persist/identity";
 import { IndexHost } from "../src/api/host";
 import { toFrontmatter } from "../src/persist/serialize";
@@ -104,6 +105,7 @@ describe("the lifecycle gates", () => {
 		expect(codeOf(() => c.api.getImageInfo("britain-5c"))).toBe("geb-not-ready");
 		expect(codeOf(() => c.api.toPixel("britain-5c", YORK.lat, YORK.lng))).toBe("geb-not-ready");
 		expect(codeOf(() => c.api.toLatLng("britain-5c", 10, 10))).toBe("geb-not-ready");
+		expect(codeOf(() => c.api.toPixels("britain-5c", [YORK]))).toBe("geb-not-ready");
 		expect(codeOf(() => c.api.featuresIn("britain-5c"))).toBe("geb-not-ready");
 	});
 
@@ -113,6 +115,7 @@ describe("the lifecycle gates", () => {
 		expect(c.api.listCrs().length).toBeGreaterThan(0);
 		expect(c.api.getCrs("earth")).not.toBeNull();
 		expect(c.api.previewFit(CLEAN, { kind: "affine" }).ok).toBe(true);
+		expect(c.api.previewToPixels(CLEAN, { kind: "affine" }, [YORK])[0]).not.toBeNull();
 		expect(c.api.version).toBe(VERSION);
 		expect(c.api.apiVersion).toBe(1);
 	});
@@ -139,6 +142,8 @@ describe("the lifecycle gates", () => {
 			["previewFit", () => c.api.previewFit(CLEAN, { kind: "affine" })],
 			["toPixel", () => c.api.toPixel("britain-5c", YORK.lat, YORK.lng)],
 			["toLatLng", () => c.api.toLatLng("britain-5c", 10, 10)],
+			["toPixels", () => c.api.toPixels("britain-5c", [YORK])],
+			["previewToPixels", () => c.api.previewToPixels(CLEAN, { kind: "affine" }, [YORK])],
 			["georefsCovering", () => c.api.georefsCovering(YORK.lat, YORK.lng)],
 			["listFeatures", () => c.api.listFeatures()],
 			["featuresIn", () => c.api.featuresIn("britain-5c")],
@@ -266,6 +271,80 @@ describe("reading", () => {
 		const back = c.api.toLatLng("britain-5c", px!.x, px!.y);
 		expect(back!.lat).toBeCloseTo(YORK.lat, 3);
 		expect(back!.lng).toBeCloseTo(YORK.lng, 3);
+	});
+
+	describe("toPixels", () => {
+		/** Deterministic spread, well inside and well outside the hull, plus two far-field and one NaN. */
+		const queries = (): LatLng[] => {
+			let s = 12345;
+			const rnd = (): number => ((s = (s * 1664525 + 1013904223) % 4294967296) / 4294967296);
+			const out: LatLng[] = [];
+			for (let i = 0; i < 47; i++) out.push({ lat: 45 + rnd() * 20, lng: -12 + rnd() * 16 });
+			out.push({ lat: -80, lng: 170 }, { lat: 89, lng: -179 }, { lat: Number.NaN, lng: 0 });
+			return out;
+		};
+
+		test("agrees element-wise with toPixel, in order, nulls included", () => {
+			const qs = queries();
+			const got = c.api.toPixels("britain-5c", qs);
+			expect(got).toHaveLength(50);
+			qs.forEach((q, i) => {
+				expect(got[i], `query ${i}`).toEqual(c.api.toPixel("britain-5c", q.lat, q.lng));
+			});
+			// The fixture must exercise every branch: inside, extrapolated, and refused.
+			expect(got.some((r) => r !== null && !r.extrapolated)).toBe(true);
+			expect(got.some((r) => r !== null && r.extrapolated)).toBe(true);
+			expect(got.filter((r) => r === null).length).toBeGreaterThanOrEqual(3);
+			expect(got[49]).toBeNull();
+		});
+
+		test("an empty batch is empty; an unknown id throws as toPixel does", () => {
+			expect(c.api.toPixels("britain-5c", [])).toEqual([]);
+			expect(codeOf(() => c.api.toPixels("no-such-map", [YORK]))).toBe("geb-no-such-georef");
+			expect(codeOf(() => c.api.toPixel("no-such-map", YORK.lat, YORK.lng))).toBe("geb-no-such-georef");
+		});
+
+		test("previewToPixels agrees with the same fit queried point by point", () => {
+			const opts = { kind: "affine" } as const;
+			const qs = queries();
+			const got = c.api.previewToPixels(CLEAN, opts, qs);
+			expect(got).toHaveLength(50);
+			// The stored map is a tps fit, so the oracle here is a one-query call on the same draft.
+			qs.forEach((q, i) => {
+				expect(got[i], `query ${i}`).toEqual(c.api.previewToPixels(CLEAN, opts, [q])[0]);
+			});
+			// And against the kernel directly, which is what previewFit's fit is built from.
+			const fit = buildFit(CLEAN, opts);
+			const size = { width: Math.max(1, ...CLEAN.map((p) => p.px)), height: Math.max(1, ...CLEAN.map((p) => p.py)) };
+			qs.forEach((q, i) => {
+				const k = toPixel(fit, q.lat, q.lng, size);
+				expect(got[i], `kernel ${i}`).toEqual(k === null ? null : { x: k.x, y: k.y, inBounds: k.inBounds, extrapolated: k.extrapolated });
+			});
+			expect(c.api.previewFit(CLEAN, opts).ok).toBe(true);
+			expect(got[49]).toBeNull();
+		});
+
+		test("an unfittable draft is all nulls, not a throw", () => {
+			const qs = [YORK, YORK, { lat: 0, lng: 0 }];
+			expect(c.api.previewToPixels(CLEAN.slice(0, 2), { kind: "affine" }, qs)).toEqual([null, null, null]);
+			const collinear: ControlPoint[] = [
+				{ px: 0, py: 0, lat: 0, lng: 0 },
+				{ px: 10, py: 10, lat: 1, lng: 1 },
+				{ px: 20, py: 20, lat: 2, lng: 2 },
+			];
+			expect(c.api.previewToPixels(collinear, { kind: "affine" }, qs)).toEqual([null, null, null]);
+			expect(c.api.previewToPixels(CLEAN, { kind: "affine" }, [])).toEqual([]);
+		});
+
+		test("an unchanged draft is not refitted; a changed one is", () => {
+			const opts = { kind: "affine" } as const;
+			const before = c.draftSolves;
+			c.api.previewToPixels(CLEAN, opts, [YORK]);
+			c.api.previewToPixels(CLEAN.map((p) => ({ ...p })), opts, [YORK, YORK]);
+			expect(c.draftSolves - before).toBe(1);
+			c.api.previewToPixels(CLEAN.slice(0, 5), opts, [YORK]);
+			expect(c.draftSolves - before).toBe(2);
+		});
 	});
 
 	test("georefsCovering, listFeatures and featuresIn agree about the one place note", () => {
@@ -675,5 +754,36 @@ describe("the change events reach a subscriber", () => {
 		const again = new ApiController(v, VERSION);
 		again.markReady();
 		expect(again.api.getImageInfo("britain-5c").staleness).toBe("unknown");
+	});
+});
+
+describe("previewToPixels with the image size", () => {
+	// Four points clustered in the middle of a 2400 x 3200 image. Without the size, the draft's
+	// tolerance comes from their pixel bbox and refuses far queries the saved map answers.
+	const CLUSTER = [CLEAN[0]!, CLEAN[1]!, CLEAN[3]!, CLEAN[4]!];
+
+	test("given the size, it answers exactly what toPixels answers for the saved fit of the same points", () => {
+		const g = georef("cluster");
+		addGeoref({ ...g, fits: [{ ...g.fits[0]!, points: CLUSTER.map((p) => ({ ...p })) }] });
+		c.markReady();
+		const grid: LatLng[] = [];
+		for (let i = 0; i <= 60; i++) for (let j = 0; j <= 100; j++) grid.push({ lat: 40 + i * 0.5, lng: -30 + j * 0.5 });
+		const saved = c.api.toPixels("cluster", grid);
+		const sized = c.api.previewToPixels(CLUSTER, { kind: "tps" }, grid, IMAGE);
+		const answered = (rs: readonly unknown[]): number => rs.filter((r) => r !== null).length;
+		expect(answered(sized)).toBe(answered(saved));
+		expect(sized).toEqual(saved);
+		// And the size is what made the difference: without it, the same draft answers fewer.
+		expect(answered(c.api.previewToPixels(CLUSTER, { kind: "tps" }, grid))).toBeLessThan(answered(saved));
+	});
+
+	test("the size is part of the memo key", () => {
+		c.markReady();
+		const before = c.draftSolves;
+		c.api.previewToPixels(CLUSTER, { kind: "tps" }, [YORK], IMAGE);
+		c.api.previewToPixels(CLUSTER, { kind: "tps" }, [YORK], { ...IMAGE });
+		expect(c.draftSolves - before).toBe(1);
+		c.api.previewToPixels(CLUSTER, { kind: "tps" }, [YORK]);
+		expect(c.draftSolves - before).toBe(2);
 	});
 });

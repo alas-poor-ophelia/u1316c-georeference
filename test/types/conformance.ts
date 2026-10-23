@@ -97,6 +97,8 @@ export const API_KEYS = [
 	"previewFit",
 	"toPixel",
 	"toLatLng",
+	"toPixels",
+	"previewToPixels",
 	"georefsCovering",
 	"listFeatures",
 	"featuresIn",

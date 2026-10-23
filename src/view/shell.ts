@@ -45,11 +45,24 @@
  * change event — the index describes the pre-write state until that arrives, by design.
  */
 import { isCodedError } from "../api/errors";
-import type { ControlPoint, FitInfo, FitPreview, GebAPI, GebEventPayload, LatLng, Pixel, PinInfo, TransformKind } from "../api/types";
+import type {
+	ControlPoint,
+	FitInfo,
+	FitPreview,
+	GebAPI,
+	GebEventPayload,
+	LatLng,
+	Pixel,
+	PinInfo,
+	PixelResult,
+	ReferenceSet,
+	TransformKind,
+} from "../api/types";
 import { COPY } from "./copy";
 import { coordinate, trust } from "./format";
 import { graticule as planGraticule, label as graticuleLabel } from "./graticule";
 import { nearestIndex, pinAt, uncertaintyRadius } from "./pins";
+import { boxIntersects, cullToBox, decimate, lineBox, type Box } from "./reference-lines";
 import { fitToContainer, IDENTITY, insideImage, panBy, toImage, zoomAbout, type Size, type Viewport } from "./viewport";
 
 /** A pin to draw, in image pixels. */
@@ -74,6 +87,14 @@ export interface FrameLine {
 	readonly axis: "lat" | "lng";
 	/** Set on the longest run of each line only; the other fragments carry an empty label. */
 	readonly label: string;
+	readonly points: readonly Pixel[];
+}
+
+/**
+ * One run of a reference line (a coastline, a river) drawn through the fit, in image pixels. A
+ * line the transform refuses part-way, or that leaves the image, arrives as several runs.
+ */
+export interface FrameRefLine {
 	readonly points: readonly Pixel[];
 }
 
@@ -151,6 +172,16 @@ export interface Frame {
 	readonly viewport: Viewport;
 	readonly pins: readonly FramePin[];
 	readonly lines: readonly FrameLine[];
+	/**
+	 * The reference lines through the fit on screen — the draft's while editing, else the saved
+	 * one. SAME ARRAY across hovers, pans and visibility toggles; a new one only when the fit it
+	 * was mapped through, the image, or the reference set changes. While `referenceVisible` is
+	 * false it may be stale (a hidden overlay is not planned); it is re-planned on the next show.
+	 * Always empty on a map whose CRS is not `earth`.
+	 */
+	readonly reference: readonly FrameRefLine[];
+	/** Whether the adapter should draw `reference`. The user's toggle, default on. */
+	readonly referenceVisible: boolean;
 	/** The draft's control points. Empty when not editing. Same array until the draft changes. */
 	readonly controlPoints: readonly FrameControlPoint[];
 	/** Same object until the editor's state changes, so the adapter can skip the toolbar. */
@@ -245,6 +276,42 @@ const REGION_SAMPLES = 4;
 /** A new map starts as a spline: a hand-drawn map has warp, and at three points a spline IS affine. */
 export const DEFAULT_MODEL: TransformKind = "tps";
 const DEFAULT_CRS = "earth";
+/**
+ * Reference vertices closer than this to the last one kept are dropped, in image pixels. At the
+ * zoom a map opens at, a hairline cannot show detail finer than a pixel and a half, and a 10 m
+ * coastline over a county-sized image puts many vertices inside every pixel.
+ */
+export const REFERENCE_MIN_PX = 1.5;
+/** The only CRS reference data is read in. A map of anywhere else draws none. */
+const REFERENCE_CRS = "earth";
+/** One empty overlay, so a map that has none hands every frame the same array. */
+const NO_REFERENCE: readonly FrameRefLine[] = [];
+const NO_REFERENCE_SET: ReferenceSet = { lines: [], sources: [], problems: [] };
+
+/**
+ * What a reference overlay was mapped through. Two keys that agree mean the overlay planned
+ * under one is still right under the other, so it is handed out again BY IDENTITY. Content, not
+ * object identity: `previewFit` returns a new object per call, and a selection change or a hover
+ * must not cost a re-plan.
+ */
+interface ReferenceKey {
+	/** Bumped by `reloadReference`: the set behind the overlay changed. */
+	readonly gen: number;
+	readonly crs: string;
+	readonly width: number;
+	readonly height: number;
+	/** `none`: there is no fit to map through, so the overlay is empty. */
+	readonly source: "saved" | "draft" | "none";
+	readonly model: TransformKind | null;
+	readonly lambda: number | undefined;
+	readonly points: readonly ControlPoint[];
+	/**
+	 * The world box the lines are culled to (`cullBox`). In the key because the points alone do
+	 * not say it: `gridBox` comes from the SAVED fit, and the cull box while editing is its union
+	 * with the draft's, so the same draft over a re-probed saved fit can need a different cull.
+	 */
+	readonly box: Box | null;
+}
 
 export const MESSAGES = {
 	indexing: "Waiting for Obsidian to finish indexing the vault.",
@@ -296,6 +363,14 @@ export class MapShell {
 	 */
 	private framePins: readonly FramePin[] = [];
 	private lines: readonly FrameLine[] = [];
+	/** The world box the graticule was planned over, padded by one grid step; the overlay's box. */
+	private gridBox: Box | null = null;
+	/** The reference overlay, and what it was mapped through. Same array while the key holds. */
+	private reference: readonly FrameRefLine[] = NO_REFERENCE;
+	private referenceKey: ReferenceKey | null = null;
+	private referenceGen = 0;
+	private referenceVisible: boolean;
+	private readonly references: () => ReferenceSet;
 	private hover: Pixel | null = null;
 
 	/** Set while the map has no note. Cleared the moment `createGeoref` resolves. */
@@ -340,8 +415,22 @@ export class MapShell {
 		private readonly api: GebAPI,
 		readonly georefId: string,
 		private readonly surface: Surface,
-		options: { readonly create?: CreateSource; readonly draft?: Draft } = {},
+		options: {
+			readonly create?: CreateSource;
+			readonly draft?: Draft;
+			/** The reference lines to draw through the fit. Absent: none. Read only when planning. */
+			readonly references?: () => ReferenceSet;
+			/**
+			 * The overlay's initial visibility, default on. A CONSTRUCTOR OPTION rather than a setter
+			 * call before `open()` so the first frame is already right: the adapter restores the
+			 * flag from layout state before it builds the shell, and a hidden overlay must not be
+			 * planned on the way to being hidden. `setReferenceVisible` changes it afterwards.
+			 */
+			readonly referenceVisible?: boolean;
+		} = {},
 	) {
+		this.references = options.references ?? ((): ReferenceSet => NO_REFERENCE_SET);
+		this.referenceVisible = options.referenceVisible ?? true;
 		this.create = options.create ?? null;
 		// A map with no note is only ever here to be edited, so it starts editing; a restored
 		// draft resumes whatever was in progress, note or no note.
@@ -496,6 +585,7 @@ export class MapShell {
 				this.pins = [];
 				this.framePins = [];
 				this.lines = [];
+				this.clearReference();
 				if (first) this.fitImage();
 				else this.paint();
 			},
@@ -519,9 +609,17 @@ export class MapShell {
 		this.pins = [];
 		this.framePins = [];
 		this.lines = [];
+		this.clearReference();
 		this.hover = null;
 		this.pendingFit = false;
 		this.surface.message(text);
+	}
+
+	/** Forget the overlay and its grid box, where the graticule is forgotten. */
+	private clearReference(): void {
+		this.gridBox = null;
+		this.reference = NO_REFERENCE;
+		this.referenceKey = null;
 	}
 
 	// --- viewport ----------------------------------------------------------------------------
@@ -706,6 +804,26 @@ export class MapShell {
 	/** True until the first save of a map that had no note. The adapter's layout state follows it. */
 	get creating(): boolean {
 		return this.create !== null;
+	}
+
+	// --- reference overlay -------------------------------------------------------------------
+
+	/**
+	 * Show or hide the reference overlay. Hiding repaints with the SAME `reference` array, so the
+	 * adapter's identity check sees only the flag move; showing plans the overlay if it was never
+	 * planned for the fit now on screen (a hidden overlay is not planned at all). Before the map
+	 * loads it only records the flag.
+	 */
+	setReferenceVisible(visible: boolean): void {
+		if (visible === this.referenceVisible) return;
+		this.referenceVisible = visible;
+		this.paint();
+	}
+
+	/** The reference set changed (`geb:reference-changed`): plan again from it, a new array. */
+	reloadReference(): void {
+		this.referenceGen++;
+		this.paint();
 	}
 
 	/**
@@ -972,6 +1090,7 @@ export class MapShell {
 			this.frameHull = pixelHull(points);
 		}
 		const coveragePct = coverage(this.frameHull, image);
+		this.syncReference();
 		if (shown !== this.reportOf) {
 			this.reportOf = shown;
 			this.frameReport = shown === null ? null : this.report(shown, coverage(pixelHull(shown.points), image));
@@ -981,6 +1100,8 @@ export class MapShell {
 			viewport: this.viewport,
 			pins: this.framePins,
 			lines: this.lines,
+			reference: this.reference,
+			referenceVisible: this.referenceVisible,
 			controlPoints: this.frameControlPoints,
 			edit: this.frameEdit,
 			creating: this.create !== null,
@@ -1113,9 +1234,12 @@ export class MapShell {
 	 * image and a grid drawn into the background around it is noise.
 	 */
 	private planLines(): FrameLine[] {
+		this.gridBox = null;
 		const region = this.worldRegion();
 		if (region === null) return [];
 		const g = planGraticule(region.sw, region.ne);
+		// The reference overlay's box, computed here so it costs no second probe of the image.
+		this.gridBox = padded(region, g.step);
 		const out: FrameLine[] = [];
 		for (const lat of g.lats) {
 			out.push(...this.traceLine("lat", lat, g.step, (t) => ({ lat, lng: region.sw.lng + t * (region.ne.lng - region.sw.lng) })));
@@ -1180,6 +1304,243 @@ export class MapShell {
 		const text = graticuleLabel(value, axis, step);
 		return runs.map((points, i) => ({ axis, label: i === longest ? text : "", points }));
 	}
+
+	// --- reference overlay: planning -------------------------------------------------------
+
+	/**
+	 * What the overlay should be mapped through right now: the draft's fit while editing (the
+	 * overlay exists to help place points, so it follows the draft), else the saved fit.
+	 */
+	private wantedReferenceKey(): ReferenceKey | null {
+		const image = this.image;
+		if (image === null) return null;
+		const base = { gen: this.referenceGen, crs: this.crs, width: image.width, height: image.height, box: this.cullBox() };
+		const e = this.edit;
+		if (e !== null) {
+			if (!e.preview.ok) return { ...base, source: "none", model: null, lambda: undefined, points: NO_POINTS };
+			return { ...base, source: "draft", model: e.model, lambda: this.fit?.lambda, points: e.points };
+		}
+		const f = this.fit;
+		if (f === null) return { ...base, source: "none", model: null, lambda: undefined, points: NO_POINTS };
+		return { ...base, source: "saved", model: f.model, lambda: f.lambda, points: f.points };
+	}
+
+	/**
+	 * Called by every paint. Re-plans only when visible AND the key moved, so a hover costs one
+	 * key comparison and a hidden overlay costs nothing. Every path that can change the fit on
+	 * screen — load, a draft edit, discard, save, a reload of the set — paints, so none of them
+	 * has to remember to call this.
+	 */
+	private syncReference(): void {
+		if (!this.referenceVisible) return;
+		const want = this.wantedReferenceKey();
+		if (want === null) return;
+		if (this.referenceKey !== null && sameReferenceKey(this.referenceKey, want)) return;
+		this.referenceKey = want;
+		const e = this.edit;
+		if (want.source === "none" || want.crs !== REFERENCE_CRS) {
+			this.reference = NO_REFERENCE;
+		} else if (want.source === "draft" && e !== null) {
+			const opts = { kind: e.model, ...(want.lambda === undefined ? {} : { lambda: want.lambda }) };
+			const points = e.points;
+			// The loaded image's size, so the draft's round-trip tolerance is the saved map's.
+			const size = { width: want.width, height: want.height };
+			this.reference = this.planReference(want.box, (q) => this.api.previewToPixels(points, opts, q, size));
+		} else {
+			this.reference = this.planReference(want.box, (q) => this.api.toPixels(this.georefId, q));
+		}
+	}
+
+	/**
+	 * The reference lines through `map`, as runs in image pixels.
+	 *
+	 * Cull first, in world space, because mapping is the cost: lines whose bbox misses the box go
+	 * without a look, and the rest keep only the segments near the box (`cullToBox`). Every
+	 * surviving run is concatenated into ONE query so the transform is entered once, not once per
+	 * vertex; the runs are cut back apart by their offsets, then again wherever the transform
+	 * refuses or the point leaves the image, exactly as `traceLine` cuts the graticule. Runs under
+	 * two points are dropped, and the rest are decimated to what a screen can show.
+	 *
+	 * THE BOX is `cullBox`: the graticule's region padded by one grid step, and while editing its
+	 * union with the draft's extrapolated box, so a draft that moves the map's region is culled
+	 * where it now is. Earth only: any other CRS draws nothing.
+	 *
+	 * KNOWN LIMIT: the box is not wrapped across the antimeridian. A map spanning 180 degrees gets
+	 * a box from about -180 to 180 by its probe's min/max, which culls nothing rather than too
+	 * much — correct, only slower — but a box built from points either side of it can be wrong.
+	 */
+	private planReference(box: Box | null, map: (q: LatLng[]) => readonly (PixelResult | null)[]): FrameRefLine[] {
+		const image = this.image;
+		if (image === null || this.crs !== REFERENCE_CRS) return [];
+		if (box === null) return [];
+		const runs: LatLng[][] = [];
+		for (const line of this.references().lines) {
+			if (!boxIntersects(lineBox(line), box)) continue;
+			for (const run of cullToBox(line, box)) runs.push(run);
+		}
+		if (runs.length === 0) return [];
+		const queries: LatLng[] = [];
+		for (const run of runs) for (const p of run) queries.push(p);
+		let mapped: readonly (PixelResult | null)[];
+		try {
+			mapped = map(queries);
+		} catch {
+			// An unloaded API throws; an overlay must never be what takes the map down with it.
+			return [];
+		}
+		const out: FrameRefLine[] = [];
+		let offset = 0;
+		for (const run of runs) {
+			let cut: Pixel[] = [];
+			const flush = (): void => {
+				if (cut.length >= 2) out.push({ points: decimate(cut, REFERENCE_MIN_PX) });
+				cut = [];
+			};
+			for (let k = 0; k < run.length; k++) {
+				const hit = mapped[offset + k] ?? null;
+				if (hit === null || !insideImage(image, hit)) {
+					flush();
+					continue;
+				}
+				cut.push({ x: hit.x, y: hit.y });
+			}
+			flush();
+			offset += run.length;
+		}
+		return out;
+	}
+
+	/**
+	 * The box to cull to: the saved fit's `gridBox`, and while editing its UNION with `draftBox`.
+	 * `gridBox` alone is stale the moment a draft moves the map's world region — lines would be
+	 * culled at where the map USED to be — and the draft box alone would drop the saved region a
+	 * user may be about to move back to. Null when neither exists.
+	 *
+	 * A draft still identical to the saved fit (just begun, or edited back) keeps `gridBox` alone:
+	 * it IS the saved fit, so that box is not stale, and a union would move the key and hand the
+	 * adapter a new array for the same picture.
+	 */
+	private cullBox(): Box | null {
+		const e = this.edit;
+		const f = this.fit;
+		if (e !== null && f !== null && e.model === f.model && samePoints(e.points, f.points)) return this.gridBox;
+		return unionBox(this.gridBox, this.draftBox());
+	}
+
+	/**
+	 * The draft's box: the control points' world bbox extrapolated linearly to the whole image by
+	 * the points' pixel bbox, padded by one grid step. Points placed in one corner say little about
+	 * the far corner, and the extrapolation is what a near-affine draft will put there; anything
+	 * bent further is what the union with `gridBox` and the pad are for. Null without a draft fit.
+	 */
+	private draftBox(): Box | null {
+		const e = this.edit;
+		const image = this.image;
+		if (e === null || !e.preview.ok || image === null) return null;
+		let south = Number.POSITIVE_INFINITY;
+		let north = Number.NEGATIVE_INFINITY;
+		let west = Number.POSITIVE_INFINITY;
+		let east = Number.NEGATIVE_INFINITY;
+		let px0 = Number.POSITIVE_INFINITY;
+		let px1 = Number.NEGATIVE_INFINITY;
+		let py0 = Number.POSITIVE_INFINITY;
+		let py1 = Number.NEGATIVE_INFINITY;
+		// The sign of each axis's covariance with its pixel axis: which image edge each world end
+		// lies past. Latitude usually falls as `py` grows; a mirrored scan need not.
+		let mx = 0;
+		let my = 0;
+		let mlat = 0;
+		let mlng = 0;
+		for (const p of e.points) {
+			south = Math.min(south, p.lat);
+			north = Math.max(north, p.lat);
+			west = Math.min(west, p.lng);
+			east = Math.max(east, p.lng);
+			px0 = Math.min(px0, p.px);
+			px1 = Math.max(px1, p.px);
+			py0 = Math.min(py0, p.py);
+			py1 = Math.max(py1, p.py);
+			mx += p.px;
+			my += p.py;
+			mlat += p.lat;
+			mlng += p.lng;
+		}
+		if (!(north >= south && east >= west)) return null;
+		const n = e.points.length;
+		mx /= n;
+		my /= n;
+		mlat /= n;
+		mlng /= n;
+		let covLng = 0;
+		let covLat = 0;
+		for (const p of e.points) {
+			covLng += (p.px - mx) * (p.lng - mlng);
+			covLat += (p.py - my) * (p.lat - mlat);
+		}
+		const [w, ea] = extrapolate(px0, px1, west, east, image.width, covLng >= 0);
+		const [s, no] = extrapolate(py0, py1, south, north, image.height, covLat >= 0);
+		const sw = { lat: s, lng: w };
+		const ne = { lat: no, lng: ea };
+		return padded({ sw, ne }, planGraticule(sw, ne).step);
+	}
+}
+
+/** A world region grown by `by` degrees on every side. */
+function padded(region: { readonly sw: LatLng; readonly ne: LatLng }, by: number): Box {
+	return { south: region.sw.lat - by, west: region.sw.lng - by, north: region.ne.lat + by, east: region.ne.lng + by };
+}
+
+/**
+ * Whether an overlay planned under `a` is still right under `b`. `source` is deliberately NOT
+ * compared: a draft just begun from the saved fit, or discarded back to it, describes the same fit
+ * by its points, model and lambda, and re-planning it would hand the adapter a new array for an
+ * identical picture. `none` still differs from any fit through its null model.
+ */
+function sameReferenceKey(a: ReferenceKey, b: ReferenceKey): boolean {
+	return (
+		a.gen === b.gen &&
+		a.crs === b.crs &&
+		a.width === b.width &&
+		a.height === b.height &&
+		a.model === b.model &&
+		a.lambda === b.lambda &&
+		sameBox(a.box, b.box) &&
+		(a.points === b.points || samePoints(a.points, b.points))
+	);
+}
+
+function sameBox(a: Box | null, b: Box | null): boolean {
+	if (a === null || b === null) return a === b;
+	return a.south === b.south && a.west === b.west && a.north === b.north && a.east === b.east;
+}
+
+/** The smallest box holding both; either may be absent. */
+function unionBox(a: Box | null, b: Box | null): Box | null {
+	if (a === null) return b;
+	if (b === null) return a;
+	return {
+		south: Math.min(a.south, b.south),
+		west: Math.min(a.west, b.west),
+		north: Math.max(a.north, b.north),
+		east: Math.max(a.east, b.east),
+	};
+}
+
+/**
+ * The world interval the whole image axis `[0, extent]` implies, from points spanning pixels
+ * `[p0, p1]` and world `[w0, w1]`: linear, so a draft whose points cover one corner still culls
+ * for the rest of the image. `rising` says the world value grows with the pixel (longitude on a
+ * map drawn east-right); latitude on a north-up map falls as `py` grows, so its low end is the
+ * one past the BOTTOM edge. A zero pixel span has no slope to extend by, so the points' own
+ * interval stands; the caller pads it.
+ */
+function extrapolate(p0: number, p1: number, w0: number, w1: number, extent: number, rising: boolean): [number, number] {
+	const span = p1 - p0;
+	if (!(span > 0)) return [w0, w1];
+	const perPx = (w1 - w0) / span;
+	const before = p0 * perPx;
+	const after = (extent - p1) * perPx;
+	return rising ? [w0 - before, w1 + after] : [w0 - after, w1 + before];
 }
 
 /**

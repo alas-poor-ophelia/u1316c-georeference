@@ -29,14 +29,15 @@
  *     kernel has no meaningful answer there, or no such loaded map. Never "not found".
  */
 import { EARTH, getCrs, listCrs } from "../core/crs";
-import { buildFit, toLatLng, toPixel, type Fit } from "../core/fit";
-import { MIN_POINTS, RECOMMENDED_POINTS, type ControlPoint, type TransformKind, type TransformOptions } from "../core/types";
+import { buildFit, toLatLng, toPixel, type Fit, type ImageSize } from "../core/fit";
+import { MIN_POINTS, RECOMMENDED_POINTS, type ControlPoint, type LatLng, type TransformKind, type TransformOptions } from "../core/types";
 import { hashBytes } from "../persist/identity";
 import { linkTarget } from "../persist/links";
 import { toFrontmatter } from "../persist/serialize";
 import { KEY, type Georeference, type ParseResult, type Staleness, type StoredFit, type VaultPort } from "../persist/types";
 import { createAndCapture, writeAndCapture } from "../persist/write";
 import { featuresIn, georefsCovering } from "../query/coverage";
+import { canonical } from "../query/fit-memo";
 import type { LoadedGeoref, Problem, WorldIndex } from "../query/types";
 import { tryParse, type TimeAdapter } from "../time/adapters";
 import { presentAt, span } from "../time/filter";
@@ -54,6 +55,7 @@ import {
 	type GebEventPayload,
 	type GeorefSummary,
 	type ImageInfo,
+	type PixelResult,
 	type UpdateGeorefPatch,
 } from "./types";
 
@@ -98,7 +100,14 @@ const project = (fit: Fit, lambda: number | undefined): FitInfo => ({
 	diagnostics: fit.diagnostics,
 });
 
-const storedFit = (points: readonly ControlPoint[], model: TransformKind, lambda: number | undefined): StoredFit => ({
+/** One query through the same path as `toPixel`; a malformed element is a null, never a throw. */
+const pixelOrNull = (fit: Fit, p: LatLng, size: ImageSize): PixelResult | null => {
+	if (typeof p !== "object" || p === null) return null;
+	const px = toPixel(fit, p.lat, p.lng, size);
+	return px === null ? null : { x: px.x, y: px.y, inBounds: px.inBounds, extrapolated: px.extrapolated };
+};
+
+const storedFit =(points: readonly ControlPoint[], model: TransformKind, lambda: number | undefined): StoredFit => ({
 	bounds: null,
 	transform: { model, ...(lambda === undefined ? {} : { lambda }) },
 	points: points.map((p) => ({ ...p })),
@@ -128,6 +137,10 @@ export class ApiController {
 	private readonly staleness = new Map<string, Staleness>();
 	/** Time adapters, keyed on id. Cleared on unload; consumers re-register on ready. */
 	private readonly time = new TimeAdapterRegistry();
+	/** The last draft `previewToPixels` fitted; see `draftFit`. Cleared on unload. */
+	private draft: { readonly key: string; readonly fit: Fit; readonly size: ImageSize } | null = null;
+	/** Solves `previewToPixels` performed, counted so the memo hit is assertable by mechanism. */
+	draftSolves = 0;
 	private readonly built: BuiltApi;
 	readonly api: GebAPI;
 
@@ -158,6 +171,7 @@ export class ApiController {
 		// A memoised fit for a 300-point spline holds that spline's solved matrix; there is no
 		// reason to keep one alive after the plugin is gone.
 		this.host.clear();
+		this.draft = null;
 		// Hygiene with no observable effect on the surface: every method throws after unload and
 		// the plugin discards this controller. Kept because a retained reference should not keep a
 		// map of verdicts alive, and labelled because no test can prove it.
@@ -247,6 +261,41 @@ export class ApiController {
 				? `No loaded georeference has id "${georefId}".`
 				: `Georeference "${georefId}" is at ${rejected.notePath} but could not be used (${rejected.code}): ${rejected.reason}`,
 		);
+	}
+
+	/**
+	 * The fit for a draft, or null when the points cannot be fitted at all (too few, degenerate).
+	 *
+	 * ONE entry, keyed by content: the overlay asks again on every pan frame with the same points,
+	 * and a user dragging a point mints a new key per drag, so anything larger than the last draft
+	 * would only accumulate dead solves. The size is the caller's image when it passes one, and
+	 * otherwise what the draft implies: the rectangle from the origin to the furthest control
+	 * pixel. The caller's size matters because it sets the round-trip tolerance: four clustered
+	 * points imply a small rectangle, and a tolerance built from it rejects answers `toPixels`
+	 * accepts for the saved fit over the same points. The size is part of the key for that reason.
+	 */
+	private draftFit(
+		points: readonly ControlPoint[],
+		opts: TransformOptions,
+		given: ImageSize | undefined,
+	): { fit: Fit; size: ImageSize } | null {
+		if (points.length < MIN_POINTS[opts.kind]) return null;
+		const sized = given === undefined ? null : { width: given.width, height: given.height };
+		const key = canonical({ points, opts, size: sized });
+		if (this.draft !== null && this.draft.key === key) return this.draft;
+		try {
+			const fit = buildFit(points, opts, null);
+			const size = sized ?? {
+				width: Math.max(1, ...points.map((p) => p.px)),
+				height: Math.max(1, ...points.map((p) => p.py)),
+			};
+			this.draftSolves += 1;
+			this.draft = { key, fit, size };
+			return this.draft;
+		} catch {
+			// Same stance as `preview`: degenerate points are an ordinary state mid-edit.
+			return null;
+		}
 	}
 
 	private preview(points: readonly ControlPoint[], opts: TransformOptions): FitPreview {
@@ -433,6 +482,17 @@ export class ApiController {
 				const g = this.require(this.snapshot(), id);
 				const px = toPixel(g.fit, lat, lng, g.size);
 				return px === null ? null : handout({ x: px.x, y: px.y, inBounds: px.inBounds, extrapolated: px.extrapolated });
+			},
+			// A loop over `toPixel`, not a Float64Array kernel: identical per element by construction,
+			// and the round-trip gate already reuses module-level scratch buffers.
+			toPixels: (id, points) => {
+				const g = this.require(this.snapshot(), id);
+				return handout(points.map((p) => pixelOrNull(g.fit, p, g.size)));
+			},
+			previewToPixels: (points, opts, queries, size) => {
+				live();
+				const d = this.draftFit(points, opts, size);
+				return handout(queries.map((q) => (d === null ? null : pixelOrNull(d.fit, q, d.size))));
 			},
 			toLatLng: (id, x, y) => {
 				const g = this.require(this.snapshot(), id);

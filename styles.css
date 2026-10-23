@@ -106,6 +106,12 @@
 	stroke-opacity: 0.45;
 }
 
+.geb-reference {
+	fill: none;
+	stroke: var(--text-muted);
+	stroke-opacity: 0.6;
+}
+
 .geb-graticule-label {
 	fill: var(--text-accent);
 	font-size: 11px;
@@ -259,6 +265,11 @@
 	padding: var(--size-4-4);
 	color: var(--text-muted);
 	background: var(--background-secondary);
+}
+
+.geb-toolbar button.is-active {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
 }
 
 .geb-toolbar button:disabled {

@@ -78,6 +78,8 @@ Errors are `Error` objects with a `code` property, so you can branch without mat
 | `previewFit` | method | Fit **caller-supplied** points with no vault involved. Returns a result, never throws on bad points. *(API 1)* |
 | `toPixel` | method | World to pixel on one map, or `null` where the transform is meaningless. *(API 1)* |
 | `toLatLng` | method | Pixel to world, or `null`. *(API 1)* |
+| `toPixels` | method | `toPixel` over many coordinates on one map: same answer per element, order kept, `null` for a bad one. *(API 1)* |
+| `previewToPixels` | method | `toPixels` through **caller-supplied** points, refit only when they change; all `null` if they cannot be fitted. Optional trailing image `size` (`width`, `height`) sets `inBounds` and the round-trip tolerance, so answers agree with `toPixels`. *(API 1)* |
 | `georefsCovering` | method | Every map that covers a coordinate. *(API 1)* |
 | `listFeatures` | method | Every place note carrying coordinates. *(API 1)* |
 | `featuresIn` | method | Every place note landing on one map, optionally only those present `at` a day on the shared time line. `null` means no such **loaded** map. *(API 1)* |

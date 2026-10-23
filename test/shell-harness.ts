@@ -6,6 +6,7 @@
  * the behaviour suite and the review-driven suite — and a fixture copied between them drifts.
  */
 import type { ApiController } from "../src/api/controller";
+import type { GebAPI } from "../src/api/types";
 import { hashBytes } from "../src/persist/identity";
 import { toFrontmatter } from "../src/persist/serialize";
 import type { Georeference } from "../src/persist/types";
@@ -84,10 +85,13 @@ export function seedVault(v: FakeVault): void {
 	for (const [path, at] of Object.entries(PLACES)) v.addNote(path, at);
 }
 
-/** A shell opened on a READY API, which is the ordinary case. */
-export function openShell(c: ApiController, s: Surface, id = ID): MapShell {
+/** The shell's constructor options: a draft, a create source, the reference getter and flag. */
+export type ShellOptions = NonNullable<ConstructorParameters<typeof MapShell>[3]>;
+
+/** A shell opened on a READY API, which is the ordinary case. `api` replaces `c.api`, to count or refuse calls. */
+export function openShell(c: ApiController, s: Surface, id = ID, options: ShellOptions = {}, api: GebAPI = c.api): MapShell {
 	c.markReady();
-	const shell = new MapShell(c.api, id, s);
+	const shell = new MapShell(api, id, s, options);
 	shell.open();
 	return shell;
 }

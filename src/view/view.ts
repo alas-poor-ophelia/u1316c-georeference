@@ -25,8 +25,8 @@
  * for a coordinate; the shell says so, this file opens the modal, and the answer goes back to the
  * shell as one call. The shell never waits on anything the DOM does.
  */
-import { ItemView, Notice, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
-import type { ControlPoint, GebAPI, Pixel, TransformKind } from "../api/types";
+import { type EventRef, ItemView, Notice, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
+import type { ControlPoint, GebAPI, Pixel, ReferenceSet, TransformKind } from "../api/types";
 import { COPY } from "./copy";
 import { ConfirmModal, discardPrompt, FitReportModal, ModelsModal } from "./dialogs";
 import { PointModal } from "./modals";
@@ -49,6 +49,8 @@ export interface GeorefViewState {
 	readonly create?: CreateSource;
 	/** The in-progress edit, so a restart does not lose it. */
 	readonly draft?: Draft;
+	/** Whether the reference lines are drawn; absent means yes. */
+	readonly referenceVisible?: boolean;
 }
 
 /** Movement past this many CSS pixels turns a press into a drag rather than a tap. */
@@ -81,6 +83,8 @@ interface Painted {
 	lines: Frame["lines"];
 	controlPoints: Frame["controlPoints"];
 	hull: Frame["hull"];
+	reference: Frame["reference"];
+	referenceVisible: boolean;
 	edit: Frame["edit"];
 	scale: number;
 	viewport: Frame["viewport"];
@@ -105,6 +109,9 @@ export class GeorefView extends ItemView implements Surface {
 	private resizeObserver: ResizeObserver | null = null;
 	private buttons: HTMLButtonElement[] = [];
 	private editBtn: HTMLButtonElement | null = null;
+	private referenceBtn: HTMLButtonElement | null = null;
+	/** The reference toggle, kept here so the layout can save it and a new shell can start with it. */
+	private referenceVisible = true;
 	private editBar: HTMLElement | null = null;
 	private modelSelect: HTMLSelectElement | null = null;
 	private editPointBtn: HTMLButtonElement | null = null;
@@ -135,6 +142,8 @@ export class GeorefView extends ItemView implements Surface {
 		 * honest outcome for a view whose plugin went away, if not the ideal one.
 		 */
 		private readonly getApi: () => GebAPI | null,
+		// The same getter shape as the API's.
+		private readonly references: () => ReferenceSet,
 	) {
 		super(leaf);
 		this.navigation = false;
@@ -160,6 +169,7 @@ export class GeorefView extends ItemView implements Surface {
 		if (this.create !== null) state.create = this.create;
 		const draft = this.shell?.draft ?? this.restoredDraft;
 		if (draft !== null) state.draft = draft;
+		state.referenceVisible = this.referenceVisible;
 		return state;
 	}
 
@@ -176,6 +186,8 @@ export class GeorefView extends ItemView implements Surface {
 		const s = state as Partial<GeorefViewState> | null | undefined;
 		const id = typeof s?.georefId === "string" ? s.georefId : "";
 		const create = readCreate(s?.create);
+		// Anything but an explicit false means shown.
+		this.referenceVisible = s?.referenceVisible !== false;
 		const same = id === this.georefId && create?.imagePath === this.create?.imagePath && create?.notePath === this.create?.notePath;
 		if (!same) {
 			this.georefId = id;
@@ -214,6 +226,7 @@ export class GeorefView extends ItemView implements Surface {
 		this.messageEl = null;
 		this.buttons = [];
 		this.editBtn = null;
+		this.referenceBtn = null;
 		this.editBar = null;
 		this.modelSelect = null;
 		this.editPointBtn = null;
@@ -251,6 +264,8 @@ export class GeorefView extends ItemView implements Surface {
 		this.shell = new MapShell(api, this.georefId, this, {
 			...(this.create === null ? {} : { create: this.create }),
 			...(draft === null ? {} : { draft }),
+			references: this.references,
+			referenceVisible: this.referenceVisible,
 		});
 		this.shell.open();
 	}
@@ -272,6 +287,9 @@ export class GeorefView extends ItemView implements Surface {
 		button(toolbar, "+", "Zoom in", () => this.shell?.zoomIn());
 		button(toolbar, "−", "Zoom out", () => this.shell?.zoomOut());
 		button(toolbar, "Fit", "Fit the whole map in the view", () => this.shell?.fitImage());
+		this.referenceBtn = button(toolbar, COPY.reference.button, COPY.reference.tip, () => {
+			this.shell?.setReferenceVisible(!(this.lastFrame?.referenceVisible ?? this.referenceVisible));
+		});
 		this.editBtn = button(toolbar, "Edit", EDIT_TIP, () => this.shell?.beginEdit());
 
 		const bar = toolbar.createSpan({ cls: "geb-edit-bar" });
@@ -280,6 +298,10 @@ export class GeorefView extends ItemView implements Surface {
 		for (const m of MODELS) select.createEl("option", { text: m.name, value: m.kind });
 		this.registerDomEvent(select, "change", () => this.shell?.setModel(select.value as TransformKind));
 		this.modelSelect = select;
+		// `REFERENCE_CHANGED` in src/plugin/references.ts, which the view may not import. Registered
+		// here, next to the DOM it repaints. The cast is the file-menu-style escape for a custom event.
+		const workspace = this.app.workspace as unknown as { on(name: string, cb: () => void): EventRef };
+		this.registerEvent(workspace.on("geb:reference-changed", () => this.shell?.reloadReference()));
 		button(bar, COPY.models.button, COPY.models.tip, () => new ModelsModal(this.app, MODELS).open());
 		this.editPointBtn = button(bar, "Edit point…", "Change the selected point's coordinate", () => this.editSelected());
 		this.deletePointBtn = button(bar, "Delete point", "Remove the selected point", () => this.deleteSelected());
@@ -524,7 +546,7 @@ export class GeorefView extends ItemView implements Surface {
 
 	private openReport(): void {
 		const report = this.lastFrame?.report ?? null;
-		if (report !== null) new FitReportModal(this.app, report).open();
+		if (report !== null) new FitReportModal(this.app, report, this.references().problems).open();
 	}
 
 	// --- Surface -------------------------------------------------------------------------------
@@ -591,10 +613,32 @@ export class GeorefView extends ItemView implements Surface {
 		const { scale, offsetX, offsetY } = frame.viewport;
 		const draftChanged = prev === null || prev.controlPoints !== frame.controlPoints;
 		const editChanged = prev === null || prev.edit !== frame.edit;
+		const referenceChanged = prev === null || prev.reference !== frame.reference || prev.referenceVisible !== frame.referenceVisible;
 		const geometryChanged =
-			prev === null || draftChanged || prev.src !== frame.image.src || prev.pins !== frame.pins || prev.lines !== frame.lines || prev.hull !== frame.hull || prev.scale !== scale;
+			prev === null ||
+			draftChanged ||
+			referenceChanged ||
+			prev.src !== frame.image.src ||
+			prev.pins !== frame.pins ||
+			prev.lines !== frame.lines ||
+			prev.hull !== frame.hull ||
+			prev.scale !== scale;
 		const viewportChanged = prev === null || prev.viewport !== frame.viewport;
-		this.painted = { src: frame.image.src, pins: frame.pins, lines: frame.lines, controlPoints: frame.controlPoints, hull: frame.hull, edit: frame.edit, scale, viewport: frame.viewport };
+		// The toggle lives in the layout too; a flip is worth a save.
+		const visibilityChanged = this.referenceVisible !== frame.referenceVisible;
+		this.referenceVisible = frame.referenceVisible;
+		this.painted = {
+			src: frame.image.src,
+			pins: frame.pins,
+			lines: frame.lines,
+			controlPoints: frame.controlPoints,
+			hull: frame.hull,
+			reference: frame.reference,
+			referenceVisible: frame.referenceVisible,
+			edit: frame.edit,
+			scale,
+			viewport: frame.viewport,
+		};
 		this.lastFrame = frame;
 
 		if (prev === null || prev.src !== frame.image.src) img.src = frame.image.src;
@@ -622,7 +666,7 @@ export class GeorefView extends ItemView implements Surface {
 		// first hover after any edit showed Save enabled on a clean draft.
 		this.syncToolbar(frame);
 		// The layout holds the draft and the create flag, so a change to either is worth a save.
-		if (draftChanged || editChanged || createCleared) this.app.workspace.requestSaveLayout();
+		if (draftChanged || editChanged || createCleared || visibilityChanged) this.app.workspace.requestSaveLayout();
 		if (!geometryChanged) return;
 
 		svg.setAttribute("width", String(width));
@@ -647,6 +691,14 @@ export class GeorefView extends ItemView implements Surface {
 				text.setAttribute("dx", "3");
 				text.setAttribute("dy", "-3");
 				text.textContent = line.label;
+			}
+		}
+		// Reference lines next, still under the pins. `frame.reference` may be stale while hidden.
+		if (frame.referenceVisible) {
+			for (const line of frame.reference) {
+				const path = svg.createSvg("polyline", { cls: "geb-reference" });
+				path.setAttribute("points", line.points.map((p) => `${p.x},${p.y}`).join(" "));
+				path.setAttribute("stroke-width", hairline);
 			}
 		}
 		// The trusted area, over the graticule and under every pin and marker. In image pixels
@@ -706,6 +758,17 @@ export class GeorefView extends ItemView implements Surface {
 	private syncToolbar(frame: Frame): void {
 		const edit = frame.edit;
 		for (const b of this.buttons) b.disabled = false;
+		if (this.referenceBtn !== null) {
+			// No reference files, no button: a vault that never added one sees nothing new. Read on
+			// every paint, and `geb:reference-changed` repaints, so adding a file brings it back.
+			if (this.references().lines.length > 0) this.referenceBtn.show();
+			else this.referenceBtn.hide();
+			const tip = frame.referenceVisible && frame.reference.length === 0 ? COPY.reference.none : COPY.reference.tip;
+			this.referenceBtn.classList.toggle("is-active", frame.referenceVisible);
+			this.referenceBtn.setAttribute("title", tip);
+			this.referenceBtn.setAttribute("aria-label", tip);
+			this.referenceBtn.setAttribute("aria-pressed", String(frame.referenceVisible));
+		}
 		this.editBtn?.setAttribute("title", frame.pending ? COPY.tips.editPending : EDIT_TIP);
 		if (edit === null) {
 			this.editBar?.hide();

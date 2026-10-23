@@ -1,0 +1,20 @@
+{
+	"type": "FeatureCollection",
+	"features": [
+		{
+			"type": "Feature",
+			"properties": { "name": "test-coast" },
+			"geometry": {
+				"type": "LineString",
+				"coordinates": [
+					[-8, 58],
+					[-4, 52.4],
+					[0, 46.8],
+					[4, 41.2],
+					[8, 35.6],
+					[12, 30]
+				]
+			}
+		}
+	]
+}

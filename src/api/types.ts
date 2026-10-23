@@ -118,6 +118,25 @@ export interface PixelResult {
 	readonly extrapolated: boolean;
 }
 
+/**
+ * One reference line in world coordinates: a coastline, a river, a border, read from a GeoJSON
+ * file in the vault. Drawn through a fit so a user can see where the fit drifts from reality.
+ * `bbox` is [south, west, north, east] so the view can skip lines that miss its region before
+ * mapping a single vertex. Lives here, not in the plugin layer, because the view may import only
+ * this module. *(API 1)*
+ */
+export interface ReferenceLine {
+	readonly bbox: readonly [number, number, number, number];
+	readonly points: readonly LatLng[];
+}
+
+/** Every reference line the plugin could read, with where they came from and what it could not read. *(API 1)* */
+export interface ReferenceSet {
+	readonly lines: readonly ReferenceLine[];
+	readonly sources: readonly string[];
+	readonly problems: readonly string[];
+}
+
 /** Where a pixel lands in the world. *(API 1)* */
 export interface WorldResult {
 	readonly lat: number;
@@ -263,6 +282,27 @@ export interface GebAPI {
 
 	toPixel(georefId: string, lat: number, lng: number): PixelResult | null;
 	toLatLng(georefId: string, x: number, y: number): WorldResult | null;
+	/**
+	 * `toPixel` over many points, one lookup. *(API 1)* Element for element identical to `toPixel`;
+	 * order and length are kept, and a non-finite input is `null` rather than a throw. An unknown
+	 * or rejected id throws `geb-no-such-georef`, as `toPixel` does.
+	 */
+	toPixels(georefId: string, points: readonly LatLng[]): readonly (PixelResult | null)[];
+	/**
+	 * `toPixels` through a fit built from caller-supplied points, no vault involved. *(API 1)*
+	 * The last draft's fit is kept by content, so asking again with unchanged points costs no
+	 * refit. Points that cannot be fitted at all (too few, degenerate) give `null` per query and
+	 * never throw. Pass the image's `size` when there is one: it sets `inBounds` and the
+	 * round-trip tolerance, so answers agree with `toPixels` on the saved map. Without it, both
+	 * are measured against the rectangle from the origin to the furthest control pixel, which
+	 * rejects more far queries when the points are clustered: advisory only.
+	 */
+	previewToPixels(
+		points: readonly ControlPoint[],
+		opts: TransformOptions,
+		queries: readonly LatLng[],
+		size?: Pick<ImageInfo, "width" | "height">,
+	): readonly (PixelResult | null)[];
 
 	georefsCovering(lat: number, lng: number, crs?: string): readonly CoverageInfo[];
 	listFeatures(): readonly FeatureInfo[];

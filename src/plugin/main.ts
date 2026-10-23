@@ -1,14 +1,22 @@
-import { debounce, FileView, MarkdownView, normalizePath, Notice, Plugin, TFile, type Debouncer, type EventRef, type View } from "obsidian";
+import { debounce, FileView, MarkdownView, normalizePath, Notice, Plugin, requestUrl, TFile, type Debouncer, type EventRef, type View } from "obsidian";
 import { ApiController } from "../api/controller";
-import type { GebAPI } from "../api/types";
+import type { GebAPI, ReferenceSet } from "../api/types";
 import { reconcile, type ReconcileOutcome } from "../persist/reconcile";
+import { parseGeoJsonLines } from "../reference/geojson";
 import { handleRename } from "../persist/rename";
 import type { VaultPort } from "../persist/types";
 import { COPY } from "../view/copy";
+import { ConfirmModal } from "../view/dialogs";
 import { CreateGeorefModal, MapPicker, type CreateChoice } from "../view/modals";
 import type { CreateSource } from "../view/shell";
 import { GeorefView, VIEW_TYPE } from "../view/view";
+import { EMPTY_REFERENCES, References } from "./references";
 import { IMAGE_EXTENSIONS, ObsidianVault } from "./vault-adapter";
+
+// Natural Earth 10 m coastline, public domain, from the project's GitHub mirror.
+const COASTLINE_URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_coastline.geojson";
+const COASTLINE_FOLDER = "Geb/reference";
+const COASTLINE_PATH = `${COASTLINE_FOLDER}/coastline-10m.geojson`;
 
 /**
  * The one place the plugin's display name lives. Wadjet scatters its display name
@@ -34,6 +42,8 @@ export default class GebPlugin extends Plugin {
 	 * long enough to coalesce a burst and short enough that a single edit feels immediate.
 	 */
 	private flushSoon: Debouncer<[], void> | null = null;
+	/** The reference lines read from the vault's Geb/reference folder; null before load and after unload. */
+	private references: References | null = null;
 
 	/**
 	 * The public surface, reachable as `app.plugins.plugins.geb.api`.
@@ -54,7 +64,18 @@ export default class GebPlugin extends Plugin {
 		// `null` after unload and the new object after a reload, exactly as a third-party plugin
 		// would by re-reading `app.plugins.plugins.geb.api`. Passing the object would let the
 		// view keep a dead API alive past `geb:unload`.
-		this.registerView(VIEW_TYPE, (leaf) => new GeorefView(leaf, () => this.api));
+		const vaultAdapter = this.vault;
+		this.references = new References(this, (path) => vaultAdapter.readBinary(path));
+		const getReferences = (): ReferenceSet => this.references?.current() ?? EMPTY_REFERENCES;
+		this.registerView(VIEW_TYPE, (leaf) => new GeorefView(leaf, () => this.api, getReferences));
+		this.addCommand({
+			id: "download-coastline",
+			name: COPY.reference.download.command,
+			callback: () => {
+				const d = COPY.reference.download;
+				new ConfirmModal(this.app, d.title, d.body, d.confirm, d.cancel, () => void this.downloadCoastline()).open();
+			},
+		});
 		this.addCommand({
 			id: "open-georef-view",
 			name: "Open georeference view",
@@ -117,6 +138,8 @@ export default class GebPlugin extends Plugin {
 		// instead of from an event. Run it once, after the cache has actually been built:
 		// `resolved` refires on every later change, so the listener detaches itself.
 		this.app.workspace.onLayoutReady(() => {
+			// Reference events are registered only now: startup fires a `create` per file.
+			this.references?.start();
 			// READY IS DECLARED IN ONE PLACE. `resolved` is the signal that the metadata cache is
 			// fully built, and every vault-backed API method refuses until then — the same "the
 			// vault was still indexing" hazard reconciliation handles, arriving in the query layer.
@@ -163,11 +186,47 @@ export default class GebPlugin extends Plugin {
 		// Cancelled before the controller goes, or a pending flush fires into a dead API.
 		this.flushSoon?.cancel();
 		this.flushSoon = null;
+		this.references?.dispose();
+		this.references = null;
 		this.controller?.unload();
 		this.app.workspace.trigger("geb:unload");
 		this.controller = null;
 		this.api = null;
 		this.vault = null;
+	}
+
+	/** Fetch the coastline into the vault's reference folder. Only ever reached through the confirm modal. */
+	private async downloadCoastline(): Promise<void> {
+		const d = COPY.reference.download;
+		if (this.app.vault.getAbstractFileByPath(COASTLINE_PATH) !== null) {
+			new Notice(d.exists);
+			return;
+		}
+		try {
+			const res = await requestUrl({ url: COASTLINE_URL });
+			// Parsed BEFORE anything is written: a captive portal or a moved file answers 200 with
+			// HTML, and saving that would leave a file in Geb/reference that only ever reports a
+			// problem. The parse is thrown away; `References` parses the saved file itself.
+			const text = res.text;
+			const parsed = parseGeoJsonLines(text, COASTLINE_URL);
+			if (parsed.lines.length === 0) {
+				new Notice(d.failed(parsed.problems[0] ?? `${COASTLINE_URL}: not GeoJSON`));
+				return;
+			}
+			// The folder may exist on disk but not yet in the vault's index (made outside Obsidian,
+			// or mid-sync); `createFolder` throws "Folder already exists" for it, so ask the disk.
+			if (this.app.vault.getFolderByPath(COASTLINE_FOLDER) === null && !(await this.app.vault.adapter.exists(COASTLINE_FOLDER))) {
+				await this.app.vault.createFolder(COASTLINE_FOLDER);
+			}
+			await this.app.vault.create(COASTLINE_PATH, text);
+			new Notice(d.done(COASTLINE_PATH));
+		} catch (e) {
+			// KNOWN LIMIT: offline is judged by `navigator.onLine`, which reports a connected
+			// interface, not a reachable internet; a dead network behind a live link reads as a
+			// failure with the request's own reason, which is still true.
+			if (typeof navigator !== "undefined" && !navigator.onLine) new Notice(d.offline);
+			else new Notice(d.failed(e instanceof Error ? e.message : String(e)));
+		}
 	}
 
 	/** The id of the georeference the active note holds, through the public API, or null. */

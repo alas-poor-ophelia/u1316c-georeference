@@ -87,6 +87,26 @@ export const COPY = {
 
 	notReady: "Obsidian is still indexing the vault. Try again in a moment.",
 
+	/** The reference overlay: GeoJSON lines from the vault drawn through the fit, and the coastline download. */
+	reference: {
+		button: "Reference",
+		tip: "Toggle reference lines over the map",
+		none: "No reference lines cover this map, or the map is not of Earth",
+		problems: "Unreadable reference files",
+		folderHint: "Put your own GeoJSON files in the vault folder Geb/reference to draw them as reference lines.",
+		download: {
+			command: "Download Natural Earth coastline",
+			title: "Download Natural Earth coastline?",
+			body: "This downloads the Natural Earth 10 metre coastline from the project's mirror on GitHub. The file is public domain and about 10 MB. It is saved as Geb/reference/coastline-10m.geojson in your vault, and you can delete it at any time.",
+			confirm: "Download",
+			cancel: "Cancel",
+			done: (path: string): string => `Coastline reference saved to ${path}`,
+			failed: (reason: string): string => `Could not download the coastline: ${reason}`,
+			offline: "No network connection. Try again when you are online.",
+			exists: "The coastline file already exists in Geb/reference",
+		},
+	},
+
 	/** The visible ways into a map: the ribbon, a command, and a header action on notes and images. */
 	doors: {
 		ribbon: "Open maps",

@@ -39,3 +39,6 @@ test/user/
 
 # Maintainer-facing plan for the projection work; same rule as SCOPE.md.
 PLAN-projection.md
+
+# A downloaded coastline in the live vault is the user's data, never a fixture.
+test/live/geb-live/Geb/reference/coastline-10m.geojson

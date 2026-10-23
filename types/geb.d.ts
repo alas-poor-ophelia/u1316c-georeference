@@ -291,6 +291,13 @@ export interface GebAPI {
 
 	toPixel(georefId: string, lat: number, lng: number): PixelResult | null;
 	toLatLng(georefId: string, x: number, y: number): WorldResult | null;
+	toPixels(georefId: string, points: readonly LatLng[]): readonly (PixelResult | null)[];
+	previewToPixels(
+		points: readonly ControlPoint[],
+		opts: TransformOptions,
+		queries: readonly LatLng[],
+		size?: Pick<ImageInfo, "width" | "height">,
+	): readonly (PixelResult | null)[];
 
 	georefsCovering(lat: number, lng: number, crs?: string): readonly CoverageInfo[];
 	listFeatures(): readonly FeatureInfo[];

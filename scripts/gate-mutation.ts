@@ -599,6 +599,22 @@ const MUTANTS: readonly Mutant[] = [
 		replace: "\t\tif (d2 <= r2 && best === null) {",
 	},
 
+	// --- view/reference-lines.ts: the reference overlay's two reductions -------------------
+	{
+		// Killed by reference.test.ts "decimate > drops vertices within minPx of the last KEPT one".
+		label: "decimation keeps the vertices it should drop and drops the ones it should keep",
+		file: "src/view/reference-lines.ts",
+		find: "\t\tif (dx * dx + dy * dy > min2) {",
+		replace: "\t\tif (dx * dx + dy * dy < min2) {",
+	},
+	{
+		// Killed by reference.test.ts "cullToBox > pads each kept run with ONE vertex either side".
+		label: "the segment cull drops its one-vertex margin either side of a kept run",
+		file: "src/view/reference-lines.ts",
+		find: "\t\tconst lo = Math.max(0, i - 1);\n\t\tconst hi = Math.min(pts.length - 1, i + 2);",
+		replace: "\t\tconst lo = i;\n\t\tconst hi = i + 1;",
+	},
+
 	// --- time: the shared line, the adapters and the filter --------------------------------
 	{
 		label: "the line's epoch is off by one day",

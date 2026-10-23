@@ -96,8 +96,12 @@ const until = async (what, pred, ms = 10000) => {
 	}
 };
 const api = () => app.plugins.plugins.geb.api;
-const q = (sel) => document.querySelector(sel);
-const qa = (sel) => Array.from(document.querySelectorAll(sel));
+// Geb selectors resolve INSIDE the gate's own leaf once it exists: the Guildmaster's other maps
+// share this window, and the first .geb-stage in the document was theirs (622 px wide) while
+// the gate waited for 240. Modals, prompts and the ribbon are document-level and stay so.
+const scopeFor = (sel) => { const l = sel.startsWith('.geb-') ? gebLeaf() : null; return l ? l.view.containerEl : document; };
+const q = (sel) => scopeFor(sel).querySelector(sel);
+const qa = (sel) => Array.from(scopeFor(sel).querySelectorAll(sel));
 const wc = () => require('@electron/remote').getCurrentWebContents();
 const mouse = (type, x, y, down = false) => {
 	const ev = { type, x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 };
@@ -263,7 +267,7 @@ async function loadPlugin(): Promise<void> {
 }
 
 /** The files the fixture vault is made of. Anything else in it is a previous run's debris. */
-const FIXTURE_FILES = ["README.md", "places/Alpha.md", "fixtures/map.png"];
+const FIXTURE_FILES = ["README.md", "places/Alpha.md", "fixtures/map.png", "Geb/reference/test-coast.geojson"];
 
 /**
  * Whatever a previous run left behind: leaves, modals, the written note and its folder, and any
@@ -526,6 +530,77 @@ const CHECKS: readonly Check[] = [
 					return `Alpha at (${alpha.x}, ${alpha.y}), extrapolated=${String(alpha.extrapolated)}`;
 				},
 				{ id: GEOREF_ID },
+			),
+	},
+	{
+		name: "the reference line is drawn, the toggle hides and shows it, it stays while a point is placed, and Discard drops that draft",
+		run: () =>
+			inWindow(
+				async ({ id, label, confirm, px, py, lat, lng }) => {
+					// The tracked fixture Geb/reference/test-coast.geojson; this check never writes there.
+					const lines = (): number => qa(".geb-overlay .geb-reference").length;
+					await until("the reference line to be drawn", () => lines() > 0, 15_000);
+					const drawn = lines();
+					buttonNamed(label, ".geb-toolbar")!.click();
+					await until("the reference line to hide", () => lines() === 0);
+					buttonNamed(label, ".geb-toolbar")!.click();
+					await until("the reference line to return", () => lines() > 0);
+					// GEOMETRY, not just a count: the fixture line runs (-8, 58) to (12, 30), and under the
+					// fixture rule lat = 60 - py/10, lng = px/10 - 10 every vertex lies on the one segment
+					// from pixel (20, 20) to (220, 300). A line drawn through a wrong fit, or with x and y
+					// swapped, would still count as one polyline.
+					// AMONG EVERY RUN, not the first: the vault may hold other reference files (the owner's
+					// own coastline draws on this map too), so the fixture line is found by its shape.
+					const runs = (): [number, number][][] =>
+						qa(".geb-overlay .geb-reference").map((el) =>
+							(el.getAttribute("points") ?? "")
+								.trim()
+								.split(/\s+/)
+								.filter((pair) => pair !== "")
+								.map((pair) => pair.split(",").map(Number) as [number, number]),
+						);
+					const allPoints = (): string => qa(".geb-overlay .geb-reference").map((el) => el.getAttribute("points") ?? "").join("|");
+					// Distance to the SEGMENT (20,20)-(220,300): clamp the projection to its ends.
+					const offSegment = ([x, y]: [number, number]): number => {
+						const dx = 200;
+						const dy = 280;
+						const t = Math.max(0, Math.min(1, ((x - 20) * dx + (y - 20) * dy) / (dx * dx + dy * dy)));
+						return Math.hypot(x - (20 + t * dx), y - (20 + t * dy));
+					};
+					const nearEnd = ([x, y]: [number, number]): boolean => Math.hypot(x - 20, y - 20) <= 2 || Math.hypot(x - 220, y - 300) <= 2;
+					const fixtureRun = runs().find((verts) => verts.length >= 2 && nearEnd(verts[0]!) && nearEnd(verts[verts.length - 1]!) && verts.every((v) => offSegment(v) <= 2));
+					if (fixtureRun === undefined) {
+						const starts = runs().map((v) => (v[0] ? `(${v[0][0].toFixed(1)}, ${v[0][1].toFixed(1)})` : "(empty)")).slice(0, 6).join(" ");
+						throw new Error(`no drawn run lies on the fixture line (20,20)-(220,300) within 2 px; ${runs().length} run(s), starting ${starts}`);
+					}
+					const worst = Math.max(...fixtureRun.map(offSegment));
+					const before = allPoints();
+					buttonNamed("Edit", ".geb-toolbar")!.click();
+					await until("the edit bar", () => q(".geb-edit-bar")!.style.display !== "none");
+					const s = toScreen(px, py);
+					await click(s.x, s.y);
+					await until("the point dialog", () => q(".modal-container") !== null);
+					const inputs = qa(".modal-container input") as HTMLInputElement[];
+					setInput(inputs[2]!, String(lat));
+					setInput(inputs[3]!, String(lng));
+					q(".modal-container button.mod-cta")!.click();
+					await until("the dialog to close", () => q(".modal-container") === null);
+					await until("5 markers", () => qa(".geb-overlay .geb-cp").length === 5);
+					const whileEditing = lines();
+					if (whileEditing === 0) throw new Error("the reference line vanished while editing");
+					// The overlay follows the draft: a fifth point refits, and the line is re-planned.
+					await until("the reference lines to follow the draft", () => allPoints() !== "" && allPoints() !== before);
+					buttonNamed("Discard", ".geb-edit-bar")!.click();
+					await until("the discard confirmation", () => buttonNamed(confirm, ".modal") !== null);
+					buttonNamed(confirm, ".modal")!.click();
+					await until("markers to clear", () => qa(".geb-overlay .geb-cp").length === 0);
+					await until("the edit bar to hide", () => q(".geb-edit-bar")!.style.display === "none");
+					if (api().getFit(id).pointCount !== 4) throw new Error("Discard wrote something");
+					return `${drawn} line(s) drawn on the fixture line (worst ${worst.toFixed(2)} px), hidden, shown, ${whileEditing} while editing and re-planned, draft discarded`;
+				},
+				// lng 4, not the rule's 2: a point ON the fixture rule leaves the fit unbent, and the 'overlay moved'
+				// assertion would then pass on float noise alone (a reviewer's catch).
+				{ id: GEOREF_ID, label: COPY.reference.button, confirm: COPY.discard.confirm, px: 120, py: 160, lat: 44, lng: 4 },
 			),
 	},
 	{
