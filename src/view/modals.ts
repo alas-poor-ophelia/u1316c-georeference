@@ -40,8 +40,12 @@ export class PointModal extends Modal {
 
 	override onOpen(): void {
 		const { contentEl } = this;
-		this.titleEl.setText(this.initial.lat === undefined ? "New control point" : "Control point");
+		const fresh = this.initial.lat === undefined;
+		this.titleEl.setText(fresh ? "New control point" : "Control point");
 		contentEl.addClass("geb-point-modal");
+		// A first-time user has just clicked the map and now faces two empty fields. Say where the
+		// numbers come from, once, on a new point; a point being corrected needs no reminder.
+		if (fresh) contentEl.createEl("p", { cls: "setting-item-description", text: COPY.coords.source });
 
 		this.field("px", "Pixel x", numberText(this.initial.px));
 		this.field("py", "Pixel y", numberText(this.initial.py));

@@ -119,6 +119,8 @@ export class ModelsModal extends Modal {
 		}
 		contentEl.createEl("p", { text: COPY.models.spread });
 		contentEl.createEl("p", { text: COPY.models.rms });
+		contentEl.createEl("h4", { text: COPY.models.sourcesTitle });
+		contentEl.createEl("p", { text: COPY.models.sources });
 		const hint = contentEl.createEl("p", { text: COPY.reference.folderHint(this.referenceFolder) });
 		hint.createEl("br");
 		hint.createEl("code", { text: COPY.reference.download.command });

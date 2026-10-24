@@ -37,6 +37,8 @@ export const COPY = {
 		mercator: "An affine fitted after projecting coordinates the way web map tiles and modern atlases draw them. Needs 3 points, and 4 is better. Exact on a Mercator base, where a flat affine drifts. Worse than the spline elsewhere. Its RMS is measured in the projected plane. Control points above 85 degrees of latitude are refused.",
 		spread: "Spread matters more than count. Four points spanning the map beat eight along one edge. The dashed outline joins the outermost points. Inside it the fit is trusted. Outside it error grows with distance. In one test, four points along a single wall scored 0.3 px RMS yet placed a distant town 20 px off.",
 		rms: "The RMS shows how closely an affine fit matches your points, in image pixels. It is shown for every model on purpose. A spline passes exactly through its points and would read zero even with a mistyped coordinate. A low RMS means your points agree with each other, not that the map is right far from them.",
+		sourcesTitle: "Where coordinates come from",
+		sources: "Every control point needs the real coordinate of a spot you can see on the image. A web map gives it: right-click a place in Google Maps or OpenStreetMap, copy the pair, and paste it into the Latitude field. Wikipedia gives one for any town, cape or summit. A map that prints its own grid gives the best points of all, at the grid intersections. Choose spots that are points, such as a cape, a river mouth or a crossroads, and spread them to the corners.",
 		button: "Which model?",
 		tip: "Compare the models and learn about spread and RMS",
 		/** Status-line names: short and dash-free, because fragments share one line and may not carry a dash. */
@@ -78,6 +80,8 @@ export const COPY = {
 	},
 
 	coords: {
+		/** Over a NEW point's fields: the first thing a first-time user needs to know. */
+		source: "Copy this spot's coordinate from a web map (right-click a place in Google Maps or OpenStreetMap), from Wikipedia, or from the map's own printed grid. A place note that already carries it can be picked below.",
 		latHint: "Decimal (51.5074 or 51,5074) or DMS (51°30'26″N), with a sign or N/S. Paste a pair to fill both fields.",
 		lngHint: "Decimal (-0.1278 or -0,1278) or DMS (0°7'39″W), with a sign or E/W.",
 		unreadable: "Cannot read this coordinate. Try 51.5074, 51,5074 or 51°30'26″N, with a sign or an N/S/E/W letter, not both.",

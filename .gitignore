@@ -35,6 +35,7 @@ test/live/screenshots/
 # publish under, so neither folder is tracked. The gate leaves them alone (it sweeps only its own).
 test/live/geb-live/britain-5c/
 test/live/geb-live/uk-relief/
+test/live/geb-live/hand-test/
 test/user/
 
 # Maintainer-facing plan for the projection work; same rule as SCOPE.md.
