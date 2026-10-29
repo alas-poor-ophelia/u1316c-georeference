@@ -30,4 +30,4 @@ The first release.
 
 ### What to report
 
-Any pin that lands off its feature with the fit report looking healthy; any note with a coordinate that does not appear and is not listed in `listProblems`; anything the plugin writes that you did not ask for.
+Any pin that lands off its feature with the fit report looking healthy; any note with a coordinate that does not appear and is not listed in `listProblems`; anything the plugin writes that you did not ask for. Issues go to [the repository](https://github.com/alas-poor-ophelia/u1316c-georeference/issues).

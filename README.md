@@ -4,6 +4,10 @@ Pin your notes to a map image inside Obsidian. The image never changes.
 
 You place a few control points that say "this pixel is this latitude and longitude," Geb fits a transform, and every note in your vault that carries a coordinate lands on the image as a pin. Geb puts a coordinate system over your picture; it is not a basemap.
 
+![A relief map of Britain in an Obsidian tab: twelve control points on capes and wall ends, a dashed trusted area joining them, a latitude and longitude grid drawn through the fit, the Natural Earth coastline over the painted shore, and Roman towns from the vault's notes pinned on their sites](docs/images/overview.png)
+
+The map in these pictures is the [United Kingdom relief location map](https://commons.wikimedia.org/wiki/File:United_Kingdom_relief_location_map.jpg) by Alexrk2 on Wikimedia Commons, CC BY-SA 3.0. The pins are notes about Roman towns.
+
 ## What Geb is not
 
 Read this first. It is the fastest way to know whether Geb is the tool you want.
@@ -28,13 +32,14 @@ Three kinds of file take part. None of them is special to Obsidian.
 
 ## Installing the beta
 
-Copy `main.js`, `manifest.json` and `styles.css` from the release into `<your vault>/.obsidian/plugins/geb/`, then enable **U+1316C Georeference** under Settings → Community plugins. Obsidian 1.13 or later, desktop and mobile.
+Copy `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/alas-poor-ophelia/u1316c-georeference/releases) into `<your vault>/.obsidian/plugins/geb/`, then enable **U+1316C Georeference** under Settings → Community plugins. Obsidian 1.13 or later, desktop and mobile. Geb is not in the community plugin list yet.
 
 ## Your first map
 
 1. **Start a map.** Right-click an image in the file explorer and choose **Georeference this image**. The same action is on the map icon in an open image's header, and in the command palette while an image is active.
 2. **Name the map.** The dialog asks for a georeference ID, prefilled from the image's name, and the note path, prefilled beside the image. The ID is any text, unique in the vault; other plugins refer to the map by it. Press **Place points**. Nothing is written yet.
 3. **Place three or more control points.** Tap or click a spot you can identify, such as a cape, a river mouth, a crossroads or the end of a wall. A dialog opens with the pixel filled in. Paste the spot's coordinate into the Latitude field as `lat, lng` and both fields fill, or type the two values; decimal degrees with a point or a comma, or degrees-minutes-seconds such as `51°30'26″N`, are all read. Coordinates come from a web map (right-click a place in Google Maps or OpenStreetMap and copy the pair), from Wikipedia, or from the map's own printed grid. If a place note already carries the coordinate, press **Pick…** and choose it.
+   ![The New control point dialog over the map while editing: the clicked pixel filled in, a line saying where coordinates come from, fields for latitude, longitude and a label, and a Pick button for a place note](docs/images/point-dialog.png)
 4. **Spread them out.** Four points at the corners beat ten along one coast. The dashed outline joining your points is the trusted area: inside it the fit is interpolated, outside it error grows with distance.
 5. **Check before saving.** As soon as three points are placed, Geb draws the latitude and longitude grid through the fit. If the grid bends where the map does not, a coordinate is likely mistyped. If the vault holds reference lines, the **Reference** button draws them too. **Details** opens the fit report.
 6. **Save.** The georeference note is written and the map reloads from it. Your place notes land as pins. From now on **Edit** opens the control points for changes; press it again to leave. If you would lose unsaved work, Geb asks first.
@@ -77,6 +82,8 @@ The status line and the fit report deliberately show the **affine RMS** in image
 
 Pins outside the trusted area are drawn dashed and flagged as extrapolated.
 
+![The fit report: affine RMS, largest error and leave-one-out at the top, the notes that explain what the numbers can and cannot say, and a row per control point with its pixel, coordinate, error, left-out error and whether it sits on the hull](docs/images/fit-report.png)
+
 ## The georeference note
 
 What Geb writes, and all it ever writes:
@@ -101,6 +108,8 @@ Change the ID under `geb-id` if you like. Rename or move the image and the link 
 
 ## Reference lines and the coastline
 
+![Zoomed on Wales and southern England: the Natural Earth coastline drawn through the fit hugs the painted shore, and the Roman town pins sit on their road junctions](docs/images/pins-and-coastline.png)
+
 Put GeoJSON files in the vault folder `Geb/reference` (or the folder you choose in settings) and their lines are drawn through the fit over every map, so drift is visible while you place points. Coordinates are read as GeoJSON specifies them, longitude and latitude on WGS 84; lines, multi-lines and polygon outlines are drawn, points are ignored. The command **Download Natural Earth coastline** fetches Natural Earth's 1:10 million coastline, public domain and about 10 MB, into that folder after you confirm; the file is parsed before it is written. Reference lines are culled to the map's region and cut where the fit cannot be inverted reliably, far outside the trusted area.
 
 ## Settings
@@ -110,6 +119,8 @@ Put GeoJSON files in the vault folder `Geb/reference` (or the folder you choose 
 - **Show reference lines by default.** For a map whose toggle you have not touched.
 - **Default transform model.** What a new map starts with. A saved map keeps its own.
 - **Folder for new georeference notes.** Empty means beside the image.
+
+![The plugin's settings tab: reference folder, the coastline download button reading Downloaded, the show-reference-lines toggle, the default transform model dropdown, and the folder for new georeference notes](docs/images/settings.png)
 
 ## Time
 
