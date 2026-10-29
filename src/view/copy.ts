@@ -107,7 +107,7 @@ export const COPY = {
 			command: "Download Natural Earth coastline",
 			title: "Download Natural Earth coastline?",
 			body: (path: string): string =>
-				`Downloads the Natural Earth 10 meter coastline from the project's mirror on GitHub. The file is public domain and about 10 MB. It is saved as ${path} in your vault. You can delete it at any time.`,
+				`Downloads the Natural Earth 1:10 million coastline from the project's mirror on GitHub. The file is public domain and about 10 MB. It is saved as ${path} in your vault. You can delete it at any time.`,
 			confirm: "Download",
 			cancel: "Cancel",
 			done: (path: string): string => `Coastline reference saved to ${path}`,

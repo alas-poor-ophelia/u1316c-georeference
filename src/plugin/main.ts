@@ -14,7 +14,7 @@ import { EMPTY_REFERENCES, References } from "./references";
 import { coastlinePath, DEFAULT_SETTINGS, defaultNotePath, GebSettingTab, matchFolderCase, readSettings, type GebSettings, type SettingsHost } from "./settings";
 import { IMAGE_EXTENSIONS, ObsidianVault } from "./vault-adapter";
 
-// Natural Earth 10 m coastline, public domain, from the project's GitHub mirror.
+// Natural Earth 1:10 million ("10m") coastline, public domain, from the project's GitHub mirror.
 // It is saved into the reference folder from the settings, as `coastlinePath` names it.
 const COASTLINE_URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_coastline.geojson";
 

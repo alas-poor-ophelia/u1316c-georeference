@@ -14,7 +14,11 @@
  */
 import { describe, expect, test } from "bun:test";
 import { ApiController } from "../src/api/controller";
-import { MIN_POINTS } from "../src/core/types";
+import { MIN_POINTS, RECOMMENDED_POINTS } from "../src/core/types";
+import { KEY } from "../src/persist/types";
+import { FEATURE_KEY } from "../src/query/types";
+import { COPY } from "../src/view/copy";
+import { MODELS } from "../src/view/shell";
 import { hashBytes } from "../src/persist/identity";
 import { toFrontmatter } from "../src/persist/serialize";
 import type { Georeference } from "../src/persist/types";
@@ -116,5 +120,57 @@ describe("API.md cannot drift from the surface", () => {
 		// example's first draft, which called the fixture a 3-point spline when it has eight.
 		expect(CLEAN).toHaveLength(8);
 		expect(section("example")).toContain("8-point thin-plate spline");
+	});
+});
+
+/**
+ * README.md gets the same chain. Its place-note and georeference-note examples name frontmatter
+ * keys, its model table names point counts, and its settings and command names are the ones the
+ * plugin shows; each is pinned to the source that owns it.
+ */
+const README = await Bun.file(`${ROOT}/README.md`).text();
+
+function readmeSection(name: string): string {
+	const open = `<!-- geb:${name} -->`;
+	const close = `<!-- /geb:${name} -->`;
+	const from = README.indexOf(open);
+	const to = README.indexOf(close);
+	if (from < 0 || to < 0) throw new Error(`README.md is missing its ${name} section markers`);
+	return README.slice(from + open.length, to);
+}
+
+/** The keys of a YAML block's lines at the given indent, in order. */
+function yamlKeys(block: string, indent: string): string[] {
+	const out: string[] = [];
+	for (const line of block.split(/\r?\n/)) {
+		const m = new RegExp(`^${indent}([A-Za-z-]+):`).exec(line);
+		if (m !== null) out.push(m[1]!);
+	}
+	return out;
+}
+
+describe("README.md cannot drift from the plugin", () => {
+	test("the place-note example names every coordinate and time key Geb reads, and no other", () => {
+		expect(yamlKeys(readmeSection("readme-place-keys"), "").sort()).toEqual([...Object.values(FEATURE_KEY)].sort());
+	});
+
+	test("the georeference-note example names every key Geb writes, and no other", () => {
+		expect(yamlKeys(readmeSection("readme-georef-keys"), "").sort()).toEqual([...Object.values(KEY)].sort());
+	});
+
+	test("the model table's point counts are the kernel's", () => {
+		for (const m of MODELS) {
+			const row = README.split(/\r?\n/).find((l) => l.startsWith(`| ${m.name} |`));
+			expect(row, `a table row for ${m.name}`).toBeDefined();
+			const cells = row!.split("|").map((c) => c.trim());
+			expect(cells[2]).toBe(`${MIN_POINTS[m.kind]} points`);
+			expect(cells[3]).toBe(String(RECOMMENDED_POINTS[m.kind]));
+		}
+	});
+
+	test("the settings, commands and doors it names are the ones the plugin shows", () => {
+		const s = COPY.settings;
+		for (const name of [s.referenceFolder.name, s.coastline.name, s.showReference.name, s.defaultModel.name, s.newNoteFolder.name]) expect(README).toContain(`**${name}.**`);
+		for (const name of [COPY.reference.download.command, COPY.doors.ribbon, COPY.doors.note, COPY.reference.button, COPY.report.button]) expect(README).toContain(`**${name}**`);
 	});
 });
