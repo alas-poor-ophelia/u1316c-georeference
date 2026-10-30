@@ -9,6 +9,7 @@
  */
 import { normalizePath, PluginSettingTab, type App, type Plugin, type Setting, type SettingDefinitionItem } from "obsidian";
 import type { TransformKind } from "../api/types";
+import { FEATURE_KEY, NO_PLACE_KEYS, PLACE_KEY_ROLES, type PlaceKeyRole, type PlaceKeys } from "../query/types";
 import { COPY } from "../view/copy";
 import { DEFAULT_MODEL, MODELS } from "../view/shell";
 
@@ -21,6 +22,11 @@ export interface GebSettings {
 	readonly defaultModel: TransformKind;
 	/** Where a new georeference note goes; empty means beside the image. */
 	readonly newNoteFolder: string;
+	/**
+	 * The user's own place-note property names per role, read after the built-in keys. Aliases and
+	 * nothing more: `lat: ["y"]` reads `y` exactly as `lat` is read.
+	 */
+	readonly placeKeys: PlaceKeys;
 }
 
 export const DEFAULT_SETTINGS: GebSettings = {
@@ -28,6 +34,7 @@ export const DEFAULT_SETTINGS: GebSettings = {
 	showReferenceByDefault: true,
 	defaultModel: DEFAULT_MODEL,
 	newNoteFolder: "",
+	placeKeys: NO_PLACE_KEYS,
 };
 
 const MODEL_KINDS: ReadonlySet<string> = new Set(MODELS.map((m) => m.kind));
@@ -48,6 +55,51 @@ function folderOr(raw: unknown, fallback: string, configDir: string | undefined)
 	if (typeof raw !== "string") return fallback;
 	const folder = normaliseFolder(raw);
 	return folderUsable(folder, configDir) ? folder : fallback;
+}
+
+const BUILT_IN_KEYS: ReadonlySet<string> = new Set(Object.values(FEATURE_KEY));
+
+/**
+ * Property names as stored or typed: a list, or one comma-separated string. Trimmed, blanks
+ * dropped, each name once. A name with a comma in it cannot be entered; that is the cost of one
+ * text field per role.
+ */
+export function splitNames(raw: unknown): string[] {
+	const parts = Array.isArray(raw) ? raw.filter((p): p is string => typeof p === "string") : typeof raw === "string" ? raw.split(",") : [];
+	return [...new Set(parts.map((p) => p.trim()).filter((p) => p !== ""))];
+}
+
+/**
+ * The place-note keys in `raw`, per role. A name that IS a built-in key is dropped: it is already
+ * read under its own role, and an alias would give one property two. For the same reason a name
+ * claimed by an earlier role is dropped from a later one. Case is kept, because frontmatter keys
+ * are read case-sensitively: `Lat` is a different property from `lat`.
+ */
+function placeKeysOr(raw: unknown): PlaceKeys {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return DEFAULT_SETTINGS.placeKeys;
+	const r = raw as Record<string, unknown>;
+	const claimed = new Set(BUILT_IN_KEYS);
+	const out: Record<PlaceKeyRole, readonly string[]> = { ...NO_PLACE_KEYS };
+	for (const role of PLACE_KEY_ROLES) {
+		const names = splitNames(r[role]).filter((n) => !claimed.has(n));
+		for (const n of names) claimed.add(n);
+		out[role] = names;
+	}
+	return out;
+}
+
+/** Same names in the same order, role by role. Order matters: the first name present is read. */
+function samePlaceKeys(a: PlaceKeys, b: PlaceKeys): boolean {
+	return PLACE_KEY_ROLES.every((role) => a[role].length === b[role].length && a[role].every((n, i) => n === b[role][i]));
+}
+
+/** The tab's control key for one role's names, `placeKeys.lat`; anything else is not one. */
+const PLACE_KEY_CONTROL = "placeKeys.";
+
+function roleOf(key: string): PlaceKeyRole | null {
+	if (!key.startsWith(PLACE_KEY_CONTROL)) return null;
+	const role = key.slice(PLACE_KEY_CONTROL.length);
+	return PLACE_KEY_ROLES.find((r) => r === role) ?? null;
 }
 
 /**
@@ -76,6 +128,7 @@ export function readSettings(raw: unknown, configDir?: string): GebSettings {
 		showReferenceByDefault: typeof r.showReferenceByDefault === "boolean" ? r.showReferenceByDefault : DEFAULT_SETTINGS.showReferenceByDefault,
 		defaultModel: typeof r.defaultModel === "string" && MODEL_KINDS.has(r.defaultModel) ? (r.defaultModel as TransformKind) : DEFAULT_SETTINGS.defaultModel,
 		newNoteFolder: folderOr(r.newNoteFolder, DEFAULT_SETTINGS.newNoteFolder, configDir),
+		placeKeys: placeKeysOr(r.placeKeys),
 	};
 }
 
@@ -103,6 +156,8 @@ export interface SettingsHost extends Plugin {
 	saveSettings(): Promise<void>;
 	/** The reference folder changed: drop what was read from the old one and read the new one now. */
 	referenceFolderChanged(): void;
+	/** The place-note keys changed: every place note may read differently, so the index is stale. */
+	placeKeysChanged(): void;
 	/**
 	 * Ask, through the same confirmation the palette command uses, then download. `started` is
 	 * called with the download's promise once the user has said yes; a cancel never calls it.
@@ -133,20 +188,50 @@ export class GebSettingTab extends PluginSettingTab {
 			{ name: s.showReference.name, desc: s.showReference.desc, control: { type: "toggle", key: "showReferenceByDefault" } },
 			{ name: s.defaultModel.name, desc: s.defaultModel.desc, control: { type: "dropdown", key: "defaultModel", options: models } },
 			{ name: s.newNoteFolder.name, desc: s.newNoteFolder.desc, render: (setting) => this.renderFolder(setting, "newNoteFolder", "") },
+			// A plain text control per role is enough here, unlike the folder fields: the field shows
+			// what was typed and is never re-read, and what was typed is what is stored, give or take
+			// spaces and repeats. A name another role or a built-in key already has is dropped from
+			// the setting without the field saying so; the tab shows the stored names when reopened.
+			{
+				type: "group",
+				heading: s.placeKeys.heading,
+				items: PLACE_KEY_ROLES.map((role) => ({
+					name: s.placeKeys.roles[role].name,
+					desc: s.placeKeys.roles[role].desc,
+					control: { type: "text", key: `${PLACE_KEY_CONTROL}${role}` },
+				})),
+			},
 		];
 	}
 
 	override getControlValue(key: string): unknown {
+		const role = roleOf(key);
+		if (role !== null) return this.host.settings.placeKeys[role].join(", ");
 		return this.host.settings[key as Key];
 	}
 
 	override async setControlValue(key: string, value: unknown): Promise<void> {
 		const before = this.host.settings;
+		const role = roleOf(key);
+		const patch = role === null ? { [key]: value } : { placeKeys: this.withNames(role, value) };
 		// Through readSettings, so a value typed here is normalised exactly as one read from disk.
-		const next = readSettings({ ...before, [key]: value }, this.app.vault.configDir);
+		const next = readSettings({ ...before, ...patch }, this.app.vault.configDir);
 		this.host.settings = next;
 		await this.host.saveSettings();
 		if (next.referenceFolder !== before.referenceFolder) this.host.referenceFolderChanged();
+		if (!samePlaceKeys(next.placeKeys, before.placeKeys)) this.host.placeKeysChanged();
+	}
+
+	/**
+	 * The place-note keys with one role's names replaced by what was typed, less any name another
+	 * role already holds. `readSettings` alone lets the EARLIER role win, and the field reports
+	 * every keystroke: typing `xylo` for latitude passes through `x`, which would take `x` from
+	 * longitude for good. The role being typed into yields instead.
+	 */
+	private withNames(role: PlaceKeyRole, value: unknown): PlaceKeys {
+		const keys = this.host.settings.placeKeys;
+		const taken = new Set(PLACE_KEY_ROLES.filter((r) => r !== role).flatMap((r) => keys[r]));
+		return { ...keys, [role]: splitNames(value).filter((n) => !taken.has(n)) };
 	}
 
 	/**

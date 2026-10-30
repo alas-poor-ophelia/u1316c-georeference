@@ -1,9 +1,9 @@
 /**
  * Reading coordinates off a place note.
  *
- * WRITE NARROW, READ BROAD. Geb writes one canonical form — flat `lat` and `lng` scalars, which
- * stay filterable by Windrose's property filter and by Dataview. It READS the forms the ecosystem
- * already uses, so a vault full of notes authored for Leaflet or Map View works on arrival.
+ * READ BROAD. Geb never writes to a place note; it READS the forms the ecosystem already uses, so
+ * a vault full of notes authored for Leaflet or Map View works on arrival. Property names the user
+ * adds in settings (`PlaceKeys`) are read too, each as an alias for one built-in key's role.
  *
  * THE LIMIT ON BREADTH IS SILENT WRONGNESS, not merely ambiguity. Two cases forced that
  * distinction, both found by review:
@@ -20,7 +20,7 @@
  */
 import { getCrs, inDomain } from "../core/crs";
 import { EARTH } from "../core/crs";
-import { FEATURE_KEY, type CoordinateSource, type Feature, type Problem, type ProblemCode } from "./types";
+import { FEATURE_KEY, NO_PLACE_KEYS, type CoordinateSource, type Feature, type PlaceKeys, type Problem, type ProblemCode } from "./types";
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
 	typeof v === "object" && v !== null && !Array.isArray(v);
@@ -106,8 +106,12 @@ const AMBIGUOUS = /^[+-]?\d+,\d+$/;
  * string, and to a user those are the same thing — a key left blank, usually by a template.
  * Counting the empty string as present reported `coords-incomplete` on every such note while the
  * bare form stayed silent: the same input, two different answers.
+ *
+ * An OWN property only. The user names keys now, and a name like `constructor` or `toString`
+ * found the object's prototype on every note and reported a problem with each of them.
  */
 const present = (fm: Record<string, unknown>, k: string): boolean => {
+	if (!Object.hasOwn(fm, k)) return false;
 	const v = fm[k];
 	if (v === undefined || v === null) return false;
 	return !(typeof v === "string" && v.trim() === "");
@@ -128,8 +132,10 @@ interface LocationRead {
  * to ignore the problem list. Something that tried and does not resolve is a note that tried to
  * be a place and failed — the case that is unanswerable if it stays silent. That gate has been
  * wrong in both directions: prose was reported while `"51.5, abc"` vanished.
+ *
+ * `key` is the property the value came from, so a message about a custom spelling names it.
  */
-function readLocation(v: unknown): LocationRead {
+function readLocation(v: unknown, key: string): LocationRead {
 	const none: LocationRead = { pair: null, problem: null };
 	const incomplete = (message: string): LocationRead => ({ pair: null, problem: { code: "coords-incomplete", message } });
 
@@ -149,7 +155,7 @@ function readLocation(v: unknown): LocationRead {
 	// Only the first half decides, which separates those from `"51.5, abc"` cleanly.
 	if (!triedToBeCoordinate(typeof parts[0] === "string" ? parts[0].trim() : parts[0])) return none;
 
-	if (parts.length !== 2) return incomplete(`location needs exactly two values, got ${parts.length}`);
+	if (parts.length !== 2) return incomplete(`${key} needs exactly two values, got ${parts.length}`);
 
 	// The decimal-comma trap: "51,5" is one number to much of Europe and two to this parser. Only
 	// the FIRST half may carry a sign — a second sign is not one number — and testing both halves
@@ -161,14 +167,14 @@ function readLocation(v: unknown): LocationRead {
 			pair: null,
 			problem: {
 				code: "coords-ambiguous",
-				message: `location "${v.trim()}" could be one number with a decimal comma or two coordinates. Write it as a list: location: [${a}, ${b}]`,
+				message: `${key} "${v.trim()}" could be one number with a decimal comma or two coordinates. Write it as a list: ${key}: [${a}, ${b}]`,
 			},
 		};
 	}
 
 	const lat = num(typeof parts[0] === "string" ? parts[0].trim() : parts[0]);
 	const lng = num(typeof parts[1] === "string" ? parts[1].trim() : parts[1]);
-	if (lat === null || lng === null) return incomplete("location holds a value that is not a plain decimal");
+	if (lat === null || lng === null) return incomplete(`${key} holds a value that is not a plain decimal`);
 	return { pair: { lat, lng }, problem: null };
 }
 
@@ -178,19 +184,25 @@ interface Pair {
 	readonly source: CoordinateSource;
 }
 
+/** A winning pair, with the keys it was read from as the name messages give it. */
+interface Won extends Pair {
+	readonly label: string;
+}
+
 /**
- * Coordinate precedence: Geb's own canonical keys, then the long-form spellings, then `location`.
+ * Coordinate precedence: the short keys, then the long-form spellings, then `location`. The user's
+ * own names join the short form after its built-in spellings, and `location` after `location`.
  *
- * Canonical first because Geb writes those, so when both are present the one Geb maintains wins.
- * An INCOMPLETE canonical pair is reported rather than quietly falling through to `location` —
- * a note with `lat` and a stray `location` used to pin at the location while ignoring the user's
- * own latitude entirely.
+ * Short first because that is the form the README leads with, and the one Windrose's property
+ * filter and Dataview read. An INCOMPLETE short pair is reported rather than quietly falling
+ * through to `location` — a note with `lat` and a stray `location` used to pin at the location
+ * while ignoring the user's own latitude entirely.
  *
  * A disagreement is reported against EVERY lower-precedence form, not only `location`. `lat/lng`
  * versus `latitude/longitude` used to let the canonical pair win in silence, discarding a value
  * the user had typed with no way for them to learn it had been discarded.
  */
-function readPair(notePath: string, fm: Record<string, unknown>, problems: Problem[]): Pair | null {
+function readPair(notePath: string, fm: Record<string, unknown>, problems: Problem[], keys: PlaceKeys): Pair | null {
 	const add = (code: ProblemCode, message: string): void => {
 		problems.push({ notePath, code, message });
 	};
@@ -199,21 +211,44 @@ function readPair(notePath: string, fm: Record<string, unknown>, problems: Probl
 	/**
 	 * Read a pair with NO reporting — for weighing a losing form against the winner.
 	 *
-	 * The first-readable search over `lngKeys` is currently unreachable: only `lat-lng` has more
-	 * than one longitude spelling, and it holds the highest precedence, so it is never a LOSER.
-	 * Kept for symmetry with `tryPair` rather than specialised to one key, but a mutation to it
-	 * cannot be caught, which is why no test claims to.
+	 * The first-readable search over each axis is currently unreachable: only `lat-lng` has more
+	 * than one spelling per axis, the user's own names included, and it holds the highest
+	 * precedence, so it is never a LOSER. Kept for symmetry with `tryPair` rather than specialised
+	 * to one key, but a mutation to it cannot be caught, which is why no test claims to.
 	 */
-	const peek = (latKey: string, lngKeys: readonly string[]): Coords | null => {
-		const lat = num(fm[latKey]);
-		const lng = lngKeys.map((k) => num(fm[k])).find((n) => n !== null) ?? null;
+	const peek = (latKeys: readonly string[], lngKeys: readonly string[]): Coords | null => {
+		const first = (ks: readonly string[]): number | null => ks.map((k) => num(fm[k])).find((n) => n !== null) ?? null;
+		const lat = first(latKeys);
+		const lng = first(lngKeys);
 		return lat === null || lng === null ? null : { lat, lng };
 	};
 
+	// The user's names come AFTER the built-in spellings, so a note carrying both, agreeing, is
+	// read from the built-in key; disagreeing, the spelling check in `tryPair` reports it.
 	const FORMS = [
-		{ source: "lat-lng" as const, label: "lat/lng", latKey: FEATURE_KEY.lat, lngKeys: [FEATURE_KEY.lng, FEATURE_KEY.long] },
-		{ source: "latitude-longitude" as const, label: "latitude/longitude", latKey: FEATURE_KEY.latitude, lngKeys: [FEATURE_KEY.longitude] },
+		{ source: "lat-lng" as const, latKeys: [FEATURE_KEY.lat, ...keys.lat], lngKeys: [FEATURE_KEY.lng, FEATURE_KEY.long, ...keys.lng] },
+		{ source: "latitude-longitude" as const, latKeys: [FEATURE_KEY.latitude], lngKeys: [FEATURE_KEY.longitude] },
 	];
+
+	/**
+	 * A form's name in a message: the keys the note actually carries, not a fixed label. A fixed
+	 * "lat/lng" over a pair read from the user's own `y` and `x` named keys that are not there.
+	 */
+	const labelOf = (latKeys: readonly string[], lngKeys: readonly string[]): string => {
+		const shown = (ks: readonly string[]): string => ks.find((k) => present(fm, k)) ?? ks[0]!;
+		return `${shown(latKeys)}/${shown(lngKeys)}`;
+	};
+
+	/**
+	 * Every `location` spelling the note carries, each read. The FIRST THAT READS as a pair is
+	 * used, not the first present: the commonest reason to add a location alias is a vault whose
+	 * `location` holds a place name, `"Paris, France"`, beside a real pair under another key. Taking
+	 * the first present read the place name, found it was never a coordinate, and dropped the pin
+	 * in silence.
+	 */
+	const locations = [FEATURE_KEY.location, ...keys.location]
+		.filter((k) => present(fm, k))
+		.map((key) => ({ key, ...readLocation(fm[key], key) }));
 
 	/**
 	 * Every form BELOW the winner, weighed against it.
@@ -224,7 +259,7 @@ function readPair(notePath: string, fm: Record<string, unknown>, problems: Probl
 	 * from `readLocation` itself rather than a second rule invented here, so prose that was never
 	 * a coordinate stays silent in a losing position exactly as it does in a winning one.
 	 */
-	const reportConflicts = (won: Pair, label: string, index: number): void => {
+	const reportConflicts = (won: Won, index: number): void => {
 		type Other = {
 			readonly label: string;
 			readonly pair: Coords | null;
@@ -233,93 +268,121 @@ function readPair(notePath: string, fm: Record<string, unknown>, problems: Probl
 		const others: Other[] = [];
 		for (let i = index + 1; i < FORMS.length; i++) {
 			const f = FORMS[i]!;
-			const anyPresent = present(fm, f.latKey) || f.lngKeys.some((k) => present(fm, k));
-			const pair = peek(f.latKey, f.lngKeys);
+			const anyPresent = [...f.latKeys, ...f.lngKeys].some((k) => present(fm, k));
+			const pair = peek(f.latKeys, f.lngKeys);
+			const label = labelOf(f.latKeys, f.lngKeys);
 			others.push({
-				label: f.label,
+				label,
 				pair,
 				problem:
 					anyPresent && pair === null
-						? { code: "coords-incomplete", message: `${f.label} is present but does not read as a pair; using ${label}` }
+						? { code: "coords-incomplete", message: `${label} is present but does not read as a pair; using ${won.label}` }
 						: null,
 			});
 		}
-		const loc = present(fm, FEATURE_KEY.location) ? readLocation(fm[FEATURE_KEY.location]) : null;
-		others.push({
-			label: "location",
-			pair: loc?.pair ?? null,
-			problem: loc?.problem == null ? null : { code: loc.problem.code, message: `${loc.problem.message} (using ${label})` },
-		});
+		for (const l of locations) {
+			others.push({
+				label: l.key,
+				pair: l.pair,
+				problem: l.problem === null ? null : { code: l.problem.code, message: `${l.problem.message} (using ${won.label})` },
+			});
+		}
 
 		for (const o of others) {
 			if (o.problem !== null) add(o.problem.code, o.problem.message);
 			else if (o.pair !== null && (o.pair.lat !== won.lat || o.pair.lng !== won.lng)) {
-				add("coords-conflict", `${o.label} and ${label} disagree; using ${label} (${won.lat}, ${won.lng})`);
+				add("coords-conflict", `${o.label} and ${won.label} disagree; using ${won.label} (${won.lat}, ${won.lng})`);
 			}
 		}
 	};
 
 	const tryPair = (
-		latKey: string,
+		latKeys: readonly string[],
 		lngKeys: readonly string[],
 		source: CoordinateSource,
-	): Pair | null | "broken" => {
-		const anyPresent = present(fm, latKey) || lngKeys.some((k) => present(fm, k));
+	): Won | null | "broken" => {
+		const anyPresent = [...latKeys, ...lngKeys].some((k) => present(fm, k));
 		if (!anyPresent) return null;
 
-		const lat = num(fm[latKey]);
-		const read = lngKeys.map((k) => ({ key: k, value: num(fm[k]) }));
-		const chosen = read.find((r) => r.value !== null);
-		if (lat === null || chosen === undefined || chosen.value === null) {
+		const lats = latKeys.map((k) => ({ key: k, value: num(fm[k]) }));
+		const lngs = lngKeys.map((k) => ({ key: k, value: num(fm[k]) }));
+		const lat = lats.find((r) => r.value !== null);
+		const lng = lngs.find((r) => r.value !== null);
+		if (lat === undefined || lat.value === null || lng === undefined || lng.value === null) {
 			add(
 				"coords-incomplete",
-				`${latKey}/${lngKeys.join(" or ")} is present but does not form a pair of plain decimals`,
+				`${latKeys.join(" or ")}/${lngKeys.join(" or ")} is present but does not form a pair of plain decimals`,
 			);
 			return "broken";
 		}
 
-		// A longitude spelling that was present but unreadable, rescued by a later one, used to
-		// resolve in silence: `{lng: "abc", long: 5}` gave 5 with no sign that `lng` was broken.
-		for (const r of read) {
-			if (r.key === chosen.key) continue;
-			if (r.value === null) {
-				if (present(fm, r.key)) add("coords-incomplete", `${r.key} is not a plain decimal; using ${chosen.key}`);
-			} else if (r.value !== chosen.value) {
-				add("coords-conflict", `${r.key} and ${chosen.key} disagree; using ${chosen.key} (${chosen.value})`);
+		// A spelling that was present but unreadable, rescued by a later one, used to resolve in
+		// silence: `{lng: "abc", long: 5}` gave 5 with no sign that `lng` was broken. Latitude has
+		// more than one spelling once the user adds their own, so both axes are checked.
+		for (const [read, chosen] of [[lats, lat], [lngs, lng]] as const) {
+			for (const r of read) {
+				if (r.key === chosen.key) continue;
+				if (r.value === null) {
+					if (present(fm, r.key)) add("coords-incomplete", `${r.key} is not a plain decimal; using ${chosen.key}`);
+				} else if (r.value !== chosen.value) {
+					add("coords-conflict", `${r.key} and ${chosen.key} disagree; using ${chosen.key} (${chosen.value})`);
+				}
 			}
 		}
-		return { lat, lng: chosen.value, source };
+		return { lat: lat.value, lng: lng.value, source, label: `${lat.key}/${lng.key}` };
 	};
 
 	for (let i = 0; i < FORMS.length; i++) {
 		const f = FORMS[i]!;
-		const got = tryPair(f.latKey, f.lngKeys, f.source);
+		const got = tryPair(f.latKeys, f.lngKeys, f.source);
 		if (got === "broken") return null;
 		if (got !== null) {
-			reportConflicts(got, f.label, i);
+			reportConflicts(got, i);
 			return got;
 		}
 	}
 
-	if (!present(fm, FEATURE_KEY.location)) return null;
-	const loc = readLocation(fm[FEATURE_KEY.location]);
-	if (loc.problem !== null) add(loc.problem.code, loc.problem.message);
-	return loc.pair === null ? null : { ...loc.pair, source: "location" };
+	// The location spellings among themselves, weighed as the pair forms are: a spelling that
+	// tried and failed is reported, and two readable ones that disagree are named. Prose that never
+	// tried to be a coordinate stays silent, because `readLocation` gives it no problem.
+	const chosen = locations.find((l) => l.pair !== null);
+	const won = chosen?.pair ?? null;
+	for (const l of locations) {
+		if (l === chosen) continue;
+		if (l.problem !== null) add(l.problem.code, chosen === undefined ? l.problem.message : `${l.problem.message} (using ${chosen.key})`);
+		else if (chosen !== undefined && won !== null && l.pair !== null && (l.pair.lat !== won.lat || l.pair.lng !== won.lng)) {
+			add("coords-conflict", `${l.key} and ${chosen.key} disagree; using ${chosen.key} (${won.lat}, ${won.lng})`);
+		}
+	}
+	return won === null ? null : { ...won, source: "location" };
 }
 
 const CERTAINTIES = ["exact", "approximate", "disputed"] as const;
 
-/** Read a place note's coordinates, or null if it has none (or none usable). */
-export function readFeature(notePath: string, fm: unknown, problems: Problem[]): Feature | null {
+/**
+ * Read a place note's coordinates, or null if it has none (or none usable).
+ *
+ * `keys` are the user's own property names per role, read after the built-in key for each. They
+ * travel as a parameter rather than being read from settings here, so this stays a pure function.
+ */
+export function readFeature(notePath: string, fm: unknown, problems: Problem[], keys: PlaceKeys = NO_PLACE_KEYS): Feature | null {
 	if (!isRecord(fm)) return null;
 	const add = (code: ProblemCode, message: string): void => {
 		problems.push({ notePath, code, message });
 	};
 
-	const pair = readPair(notePath, fm, problems);
+	const pair = readPair(notePath, fm, problems, keys);
 	if (pair === null) return null;
 
-	const rawCrs = fm[FEATURE_KEY.crs];
+	// For a role with one value, the first key present is the one read: the built-in, then the
+	// user's names in their order. Every message below names that key, so a problem with a custom
+	// spelling points at the property the user actually wrote.
+	const keyFor = (builtin: string, custom: readonly string[]): string => [builtin, ...custom].find((k) => present(fm, k)) ?? builtin;
+	const crsKey = keyFor(FEATURE_KEY.crs, keys.crs);
+	const uncertaintyKey = keyFor(FEATURE_KEY.uncertainty, keys.uncertainty);
+	const certaintyKey = keyFor(FEATURE_KEY.certainty, keys.certainty);
+
+	const rawCrs = fm[crsKey];
 	// TRIMMED, and blank-after-trim falls back to earth. `present` already counts `crs: " "` as a
 	// blank key, but this line only compared against `""`, so `" "` became the crs id, failed the
 	// registry lookup and dropped the note entirely — while `crs: ""` kept its pin. One blank
@@ -333,8 +396,8 @@ export function readFeature(notePath: string, fm: unknown, problems: Problem[]):
 	// template leaving `crs:` empty is not making a mistake. The georeference side still reports
 	// its blank `geb-crs`, and that asymmetry is deliberate — `geb-crs` is a key GEB writes, so a
 	// blank one is a damaged record, where `crs` is the user's own optional annotation.
-	if (present(fm, FEATURE_KEY.crs) && typeof rawCrs !== "string") {
-		add("unknown-crs", `${FEATURE_KEY.crs} is not text; assuming ${EARTH.name}`);
+	if (present(fm, crsKey) && typeof rawCrs !== "string") {
+		add("unknown-crs", `${crsKey} is not text; assuming ${EARTH.name}`);
 	}
 
 	// Validated against the CRS registry, not compared to a hardcoded "earth". A misspelled or
@@ -351,23 +414,23 @@ export function readFeature(notePath: string, fm: unknown, problems: Problem[]):
 
 	// `distance`, not `num`: a radius is not a coordinate, and `1e3` metres is a normal thing to
 	// write. The coordinate parser's ban on exponents was right for latitudes and wrong here.
-	const uncertainty = distance(fm[FEATURE_KEY.uncertainty]);
-	if (present(fm, FEATURE_KEY.uncertainty) && (uncertainty === null || uncertainty < 0)) {
-		add("bad-uncertainty", `${FEATURE_KEY.uncertainty} must be a non-negative number; ignoring it`);
+	const uncertainty = distance(fm[uncertaintyKey]);
+	if (present(fm, uncertaintyKey) && (uncertainty === null || uncertainty < 0)) {
+		add("bad-uncertainty", `${uncertaintyKey} must be a non-negative number; ignoring it`);
 	}
 
 	// The `present` gate comes FIRST so a blank key is simply absent. The string branch used to
 	// run ahead of it, so `geb-certainty: ""` was reported while `geb-certainty:` and a blank
 	// `geb-uncertainty` were silent — one blank value, two different answers.
 	let certainty: Feature["certainty"];
-	if (present(fm, FEATURE_KEY.certainty)) {
-		const rawCertainty = fm[FEATURE_KEY.certainty];
+	if (present(fm, certaintyKey)) {
+		const rawCertainty = fm[certaintyKey];
 		if (typeof rawCertainty !== "string") {
-			add("bad-certainty", `${FEATURE_KEY.certainty} should be text`);
+			add("bad-certainty", `${certaintyKey} should be text`);
 		} else {
 			// Case-insensitive on purpose: "Exact" is what a user types.
 			const match = CERTAINTIES.find((c) => c === rawCertainty.trim().toLowerCase());
-			if (match === undefined) add("bad-certainty", `${FEATURE_KEY.certainty} should be one of ${CERTAINTIES.join(", ")}`);
+			if (match === undefined) add("bad-certainty", `${certaintyKey} should be one of ${CERTAINTIES.join(", ")}`);
 			else certainty = match;
 		}
 	}
@@ -383,9 +446,9 @@ export function readFeature(notePath: string, fm: unknown, problems: Problem[]):
 		if (present(fm, k)) add("bad-text", `${k} must be text or a number; ignoring it`);
 		return undefined;
 	};
-	const from = text(FEATURE_KEY.from);
-	const to = text(FEATURE_KEY.to);
-	const calendar = text(FEATURE_KEY.calendar);
+	const from = text(keyFor(FEATURE_KEY.from, keys.from));
+	const to = text(keyFor(FEATURE_KEY.to, keys.to));
+	const calendar = text(keyFor(FEATURE_KEY.calendar, keys.calendar));
 
 	return {
 		notePath,

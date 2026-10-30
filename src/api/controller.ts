@@ -149,7 +149,8 @@ export class ApiController {
 		private readonly pluginVersion: string,
 		/**
 		 * The cached index. Injectable so a test can drive invalidation directly and read the
-		 * memo's solve counters — proving reuse by MECHANISM rather than by timing a stopwatch.
+		 * memo's solve counters — proving reuse by MECHANISM rather than by timing a stopwatch. The
+		 * plugin hands in one that reads the user's place-note keys from settings.
 		 */
 		readonly host: IndexHost = new IndexHost(port),
 	) {

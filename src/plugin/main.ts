@@ -1,5 +1,6 @@
 import { debounce, FileView, MarkdownView, normalizePath, Notice, Plugin, requestUrl, TFile, TFolder, type Debouncer, type EventRef, type View } from "obsidian";
 import { ApiController } from "../api/controller";
+import { IndexHost } from "../api/host";
 import type { GebAPI, ReferenceSet } from "../api/types";
 import { reconcile, type ReconcileOutcome } from "../persist/reconcile";
 import { parseGeoJsonLines } from "../reference/geojson";
@@ -72,7 +73,9 @@ export default class GebPlugin extends Plugin implements SettingsHost {
 		this.settings = readSettings(raw, this.app.vault.configDir);
 		this.vault = new ObsidianVault(this.app);
 		this.alive = true;
-		this.controller = new ApiController(this.vault, this.manifest.version);
+		// The index reads the user's own place-note keys through a getter, so a change in the
+		// settings tab reaches the next rebuild without the API layer knowing settings exist.
+		this.controller = new ApiController(this.vault, this.manifest.version, new IndexHost(this.vault, () => this.settings.placeKeys));
 		this.api = this.controller.api;
 
 		// THE VIEW IS A CONSUMER OF THE API, handed a getter rather than the object: it must see
@@ -219,6 +222,19 @@ export default class GebPlugin extends Plugin implements SettingsHost {
 
 	referenceFolderChanged(): void {
 		this.references?.folderChanged();
+	}
+
+	/**
+	 * The place-note keys changed: every place note may now read differently. The index is marked
+	 * dirty, NOT cleared, because the solved fits do not depend on these keys and are the expensive
+	 * part. The debounced flush then tells open views, exactly as a vault change does, so a pin read
+	 * through a new key appears without reopening the map. The tab calls this per keystroke; the
+	 * dirty flag is free and the debounce resets, so one rebuild follows a pause in typing. Before
+	 * the vault is watched there is no flush yet, and the first build reads the new keys anyway.
+	 */
+	placeKeysChanged(): void {
+		this.controller?.host.invalidate();
+		this.flushSoon?.();
 	}
 
 	/** The palette command and the settings tab's button: one confirmation, one download. */

@@ -141,6 +141,21 @@ export const COPY = {
 			name: "Folder for new georeference notes",
 			desc: "Where the georeference note goes when you georeference an image. Leave empty to create it beside the image.",
 		},
+		/** One row per role. Each names the built-in keys it comes after, because those win when both are there. */
+		placeKeys: {
+			heading: "Place note properties",
+			roles: {
+				lat: { name: "Also read latitude from", desc: "Property names, separated by commas, read after lat." },
+				lng: { name: "Also read longitude from", desc: "Property names, separated by commas, read after lng and long." },
+				location: { name: "Also read a coordinate pair from", desc: 'Property names, separated by commas, read after location. A list [lat, lng] or "lat, lng".' },
+				crs: { name: "Also read the coordinate system from", desc: "Property names, separated by commas, read after crs." },
+				uncertainty: { name: "Also read the uncertainty from", desc: "Property names, separated by commas, read after geb-uncertainty." },
+				certainty: { name: "Also read the certainty from", desc: "Property names, separated by commas, read after geb-certainty." },
+				from: { name: "Also read the start date from", desc: "Property names, separated by commas, read after geb-from." },
+				to: { name: "Also read the end date from", desc: "Property names, separated by commas, read after geb-to." },
+				calendar: { name: "Also read the calendar from", desc: "Property names, separated by commas, read after geb-calendar." },
+			},
+		},
 	},
 
 	/** The visible ways into a map: the ribbon, a command, and a header action on notes and images. */

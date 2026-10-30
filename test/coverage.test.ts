@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { TransformKind } from "../src/core/types";
+import { IndexHost } from "../src/api/host";
 import { hashBytes } from "../src/persist/identity";
 import { toFrontmatter } from "../src/persist/serialize";
 import type { Georeference } from "../src/persist/types";
 import { featuresIn, georefsCovering } from "../src/query/coverage";
 import { readFeature } from "../src/query/features";
 import { buildIndex } from "../src/query/store";
-import type { Problem, ProblemCode, WorldIndex } from "../src/query/types";
+import { NO_PLACE_KEYS, type PlaceKeys, type Problem, type ProblemCode, type WorldIndex } from "../src/query/types";
 import { CLEAN, IMAGE, truth } from "./fixtures";
 import { FakeVault } from "./fake-vault";
 
@@ -1102,5 +1103,140 @@ describe("a losing form differing in only ONE half", () => {
 		// The mirror of the lat-only case, which was the only half ever tested.
 		addPlace("places/LoneLng.md", { lat: 53.9591, lng: -1.0815, longitude: 7 });
 		expect(codes()).toEqual(["coords-incomplete"]);
+	});
+});
+
+describe("the user's own property names, read as aliases for the built-in keys", () => {
+	const KEYS: PlaceKeys = {
+		...NO_PLACE_KEYS,
+		lat: ["y", "breite"],
+		lng: ["x"],
+		location: ["coords"],
+		crs: ["world"],
+		uncertainty: ["radius"],
+		from: ["born"],
+	};
+	const messages = (index: WorldIndex): string[] => index.problems.map((p) => p.message);
+
+	test("buildIndex reads a note through them, and without them the note is not a place", () => {
+		addGeoref(georef("britain-5c"));
+		addPlace("places/Eboracum.md", { y: YORK.lat, x: YORK.lng });
+		expect(featuresIn(buildIndex(v, undefined, KEYS), "britain-5c")).toHaveLength(1);
+		// Not a problem either: a note with no key Geb reads is simply not a place.
+		const plain = buildIndex(v);
+		expect(plain.features).toEqual([]);
+		expect(plain.problems).toEqual([]);
+	});
+
+	test("a custom latitude alone, beside the built-in longitude, is a place", () => {
+		addPlace("places/Half.md", { breite: YORK.lat, lng: YORK.lng });
+		const index = buildIndex(v, undefined, KEYS);
+		expect(index.features[0]!.lat).toBeCloseTo(YORK.lat, 4);
+		expect(index.features[0]!.source).toBe("lat-lng");
+		expect(index.problems).toEqual([]);
+	});
+
+	test("a later custom name is read when the earlier one is absent", () => {
+		// `breite` is the second latitude name; the first, `y`, is not on the note.
+		addPlace("places/Second.md", { breite: YORK.lat, x: YORK.lng });
+		expect(buildIndex(v, undefined, KEYS).features).toHaveLength(1);
+	});
+
+	test("a built-in and a custom name that agree are read without complaint", () => {
+		addPlace("places/Agree.md", { lat: YORK.lat, y: YORK.lat, lng: YORK.lng });
+		const index = buildIndex(v, undefined, KEYS);
+		expect(index.features[0]!.lat).toBeCloseTo(YORK.lat, 4);
+		expect(index.problems).toEqual([]);
+	});
+
+	test("a built-in and a custom name that disagree: the built-in is used and the custom one is named", () => {
+		addPlace("places/Disagree.md", { lat: YORK.lat, y: 51.5, lng: YORK.lng });
+		const index = buildIndex(v, undefined, KEYS);
+		expect(index.features[0]!.lat).toBeCloseTo(YORK.lat, 4);
+		expect(problemCodes(index)).toEqual(["coords-conflict"]);
+		expect(messages(index)).toEqual([`y and lat disagree; using lat (${YORK.lat})`]);
+	});
+
+	test("a custom latitude that does not read is reported, while the built-in is used", () => {
+		addPlace("places/Unreadable.md", { lat: YORK.lat, y: "north", lng: YORK.lng });
+		const index = buildIndex(v, undefined, KEYS);
+		expect(index.features).toHaveLength(1);
+		expect(messages(index)).toEqual(["y is not a plain decimal; using lat"]);
+	});
+
+	test("a losing form is weighed against the custom keys the winner was read from, by name", () => {
+		// The winner's label used to be the fixed "lat/lng", which names keys this note does not have.
+		addPlace("places/Losing.md", { y: YORK.lat, x: YORK.lng, latitude: 51.5, longitude: -0.13 });
+		const index = buildIndex(v, undefined, KEYS);
+		expect(index.features[0]!.lat).toBeCloseTo(YORK.lat, 4);
+		expect(messages(index)).toEqual([`latitude/longitude and y/x disagree; using y/x (${YORK.lat}, ${YORK.lng})`]);
+	});
+
+	test("a custom location holds a pair, and its problems name it", () => {
+		addPlace("places/Pair.md", { coords: [YORK.lat, YORK.lng] });
+		addPlace("places/Comma.md", { coords: "51,5" });
+		const index = buildIndex(v, undefined, KEYS);
+		expect(index.features.map((f) => [f.notePath, f.source])).toEqual([["places/Pair.md", "location"]]);
+		expect(messages(index)).toEqual([
+			'coords "51,5" could be one number with a decimal comma or two coordinates. Write it as a list: coords: [51, 5]',
+		]);
+	});
+
+	test("the built-in location is read before a custom one, and a disagreement names both", () => {
+		addPlace("places/Two.md", { location: [YORK.lat, YORK.lng], coords: [ORKNEY.lat, ORKNEY.lng] });
+		const index = buildIndex(v, undefined, KEYS);
+		expect(index.features[0]!.lat).toBeCloseTo(YORK.lat, 4);
+		expect(messages(index)).toEqual([`coords and location disagree; using location (${YORK.lat}, ${YORK.lng})`]);
+	});
+
+	test("a location holding a place name gives way, in silence, to a custom pair", () => {
+		// The reason to add a location alias at all. Reading only the first spelling present found
+		// "Paris, France", which never tried to be a coordinate, and dropped the pin without a word.
+		addPlace("places/Paris.md", { location: "Paris, France", coords: [48.85, 2.35] });
+		const index = buildIndex(v, undefined, KEYS);
+		expect(index.features.map((f) => [f.lat, f.lng, f.source])).toEqual([[48.85, 2.35, "location"]]);
+		expect(index.problems).toEqual([]);
+	});
+
+	test("a location that tried and failed is reported, and the custom pair after it is used", () => {
+		addPlace("places/Tried.md", { location: "51.5, abc", coords: [48.85, 2.35] });
+		const index = buildIndex(v, undefined, KEYS);
+		expect(index.features[0]!.lat).toBeCloseTo(48.85, 4);
+		expect(messages(index)).toEqual(["location holds a value that is not a plain decimal (using coords)"]);
+	});
+
+	test("a custom name that is also an Object property is not found on every note", () => {
+		// `fm.constructor` is Object's own constructor on every note; reading it as present
+		// reported a problem with each one.
+		addPlace("places/Eboracum.md", { lat: YORK.lat, lng: YORK.lng });
+		const index = buildIndex(v, undefined, { ...NO_PLACE_KEYS, crs: ["constructor"], from: ["toString"] });
+		expect(index.features).toHaveLength(1);
+		expect(index.problems).toEqual([]);
+	});
+
+	test("custom names for the coordinate system, the uncertainty and a date are read", () => {
+		addPlace("places/Optional.md", { lat: YORK.lat, lng: YORK.lng, world: "earth", radius: 500, born: "71" });
+		const f = buildIndex(v, undefined, KEYS).features[0]!;
+		expect([f.crs, f.uncertainty, f.from]).toEqual(["earth", 500, "71"]);
+	});
+
+	test("a problem with a custom optional key names that key", () => {
+		addPlace("places/Bad.md", { lat: YORK.lat, lng: YORK.lng, world: 5, radius: "far", born: [71] });
+		expect(messages(buildIndex(v, undefined, KEYS))).toEqual([
+			"world is not text; assuming Earth",
+			"radius must be a non-negative number; ignoring it",
+			"born must be text or a number; ignoring it",
+		]);
+	});
+
+	test("the index host reads the keys at each rebuild, so a change takes effect after an invalidation", () => {
+		addPlace("places/Eboracum.md", { y: YORK.lat, x: YORK.lng });
+		let keys: PlaceKeys = NO_PLACE_KEYS;
+		const host = new IndexHost(v, () => keys);
+		expect(host.snapshot().features).toEqual([]);
+		keys = KEYS;
+		expect(host.snapshot().features).toEqual([]);
+		host.invalidate();
+		expect(host.snapshot().features).toHaveLength(1);
 	});
 });

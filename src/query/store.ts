@@ -11,7 +11,7 @@ import { fromFrontmatter, looksLikeGeoref } from "../persist/serialize";
 import type { VaultPort } from "../persist/types";
 import { readFeature } from "./features";
 import { fitKey, type FitMemo } from "./fit-memo";
-import type { Feature, LoadedGeoref, Problem, RejectedGeoref, WorldIndex } from "./types";
+import { NO_PLACE_KEYS, type Feature, type LoadedGeoref, type PlaceKeys, type Problem, type RejectedGeoref, type WorldIndex } from "./types";
 
 function loadGeoref(
 	port: VaultPort,
@@ -93,8 +93,10 @@ const isLoaded = (g: LoadedGeoref | RejectedGeoref): g is LoadedGeoref => "fit" 
  * Built fresh on demand; nothing is cached. The cost is measured and affordable for an
  * event-driven or per-user-action rebuild, and not for a per-frame or per-keystroke one — see the
  * note in types.ts. Who triggers a rebuild is a phase-4 decision, deliberately not guessed here.
+ *
+ * `keys` are the user's own place-note property names, from settings; none by default.
  */
-export function buildIndex(port: VaultPort, memo?: FitMemo): WorldIndex {
+export function buildIndex(port: VaultPort, memo?: FitMemo, keys: PlaceKeys = NO_PLACE_KEYS): WorldIndex {
 	const problems: Problem[] = [];
 	const georefs: LoadedGeoref[] = [];
 	const rejected: RejectedGeoref[] = [];
@@ -136,7 +138,7 @@ export function buildIndex(port: VaultPort, memo?: FitMemo): WorldIndex {
 		// a second copy of `typeof geb-id === "string"`, so a note with `geb-id: 1066` was neither
 		// listed as a georeference nor excluded from here — it was pinned as a place instead.
 		if (looksLikeGeoref(fm)) continue;
-		const f = readFeature(notePath, fm, problems);
+		const f = readFeature(notePath, fm, problems, keys);
 		if (f !== null) features.push(f);
 	}
 

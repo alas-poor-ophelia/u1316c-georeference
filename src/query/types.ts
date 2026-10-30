@@ -156,3 +156,16 @@ export const FEATURE_KEY = {
 	to: "geb-to",
 	calendar: "geb-calendar",
 } as const;
+
+/**
+ * The roles a place-note key plays. A property name the user adds in settings is an ALIAS for one
+ * of these and nothing more: it is read exactly as the built-in key for that role is read.
+ * `location` is the one property holding a pair, `[lat, lng]` or `"lat, lng"`.
+ */
+export const PLACE_KEY_ROLES = ["lat", "lng", "location", "crs", "uncertainty", "certainty", "from", "to", "calendar"] as const;
+export type PlaceKeyRole = (typeof PLACE_KEY_ROLES)[number];
+
+/** The user's own property names per role, read after the built-in keys for that role. */
+export type PlaceKeys = Readonly<Record<PlaceKeyRole, readonly string[]>>;
+
+export const NO_PLACE_KEYS: PlaceKeys = { lat: [], lng: [], location: [], crs: [], uncertainty: [], certainty: [], from: [], to: [], calendar: [] };

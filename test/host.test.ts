@@ -175,6 +175,25 @@ describe("scope and staleness", () => {
 		expect(change.events).toEqual(["fit-changed"]);
 	});
 
+	test("a path invalidated AFTER a pathless one does not narrow it back", () => {
+		// The settings tab's key change asks for "everywhere"; a note Geb writes inside the same
+		// debounce window then names one path. The rebuild used to diff only that path, and the
+		// change everywhere else was overwritten unannounced.
+		const moved = stored();
+		moved[0] = { ...moved[0]!, px: moved[0]!.px + 30 };
+		v.notes.set(MAP, toFrontmatter(record("britain-5c", moved)));
+
+		host.invalidate(); // "somewhere"
+		host.invalidate(PLACE); // ...then a path that did NOT change
+		expect(host.flush()!.paths).toEqual([MAP]);
+
+		// Spent by that rebuild: the next one is scoped again.
+		v.notes.set(PLACE, { lat: 51.51, lng: -0.13 });
+		v.notes.set(MAP, toFrontmatter(record("britain-5c")));
+		host.invalidate(PLACE);
+		expect(host.flush()!.paths).toEqual([PLACE]);
+	});
+
 	test("a rejection changing its REASON still fires georefs-changed", () => {
 		// The clause my other tests could not reach. A map crossing loaded-to-rejected is caught
 		// by the loaded-ness check alone, so the rejection FINGERPRINT only earns its place when a

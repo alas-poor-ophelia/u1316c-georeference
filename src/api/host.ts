@@ -32,7 +32,7 @@
 import { buildIndex } from "../query/store";
 import { canonical, fitKey, FitMemo } from "../query/fit-memo";
 import type { VaultPort } from "../persist/types";
-import type { WorldIndex } from "../query/types";
+import { NO_PLACE_KEYS, type PlaceKeys, type WorldIndex } from "../query/types";
 
 /** The three things that can change at one note path, each as a comparable fingerprint. */
 interface PathSignature {
@@ -68,6 +68,13 @@ export class IndexHost {
 	private sigs = new Map<string, PathSignature>();
 	private dirty = true;
 	private readonly pending = new Set<string>();
+	/**
+	 * A pathless invalidation is owed a FULL diff, until a rebuild gives it one. Clearing `pending`
+	 * was not enough: a path invalidated after it, inside the same debounce window, refilled the
+	 * set and narrowed the rebuild to that one note, so every other note that moved under a new
+	 * place-note key, or a folder's worth of notes, was never announced.
+	 */
+	private everywhere = false;
 	private gen = 0;
 	/** The first build is the initial STATE, not a change. See `rebuild`. */
 	private everBuilt = false;
@@ -81,7 +88,15 @@ export class IndexHost {
 	 */
 	private held: { readonly events: Set<ChangeEvent>; readonly paths: Set<string> } | null = null;
 
-	constructor(private readonly port: VaultPort) {}
+	constructor(
+		private readonly port: VaultPort,
+		/**
+		 * The user's own place-note property names, READ AT EACH REBUILD rather than captured, so a
+		 * settings change takes effect on the next rebuild after an `invalidate()`. A getter, not the
+		 * settings object, because src/api knows nothing of the plugin.
+		 */
+		private readonly placeKeys: () => PlaceKeys = () => NO_PLACE_KEYS,
+	) {}
 
 	/** Exposed for the solve-count assertions; the memo is otherwise this host's business. */
 	get memo(): FitMemo {
@@ -109,7 +124,10 @@ export class IndexHost {
 	invalidate(path?: string): void {
 		this.dirty = true;
 		if (path !== undefined) this.pending.add(path);
-		else this.pending.clear();
+		else {
+			this.pending.clear();
+			this.everywhere = true;
+		}
 	}
 
 	/** The current snapshot, rebuilt first if the vault has moved under us. The change is HELD. */
@@ -150,6 +168,7 @@ export class IndexHost {
 		this.held = null;
 		this.sigs = new Map();
 		this.pending.clear();
+		this.everywhere = false;
 		this.dirty = true;
 		this.everBuilt = false;
 		this.fits.clear();
@@ -157,7 +176,7 @@ export class IndexHost {
 
 	private rebuild(): ChangeSet {
 		const before = this.sigs;
-		const next = buildIndex(this.port, this.fits);
+		const next = buildIndex(this.port, this.fits, this.placeKeys());
 		const after = signatures(next);
 
 		// THE FIRST BUILD IS NOT A CHANGE. Diffing it against an empty map would report every map
@@ -170,15 +189,17 @@ export class IndexHost {
 			this.sigs = after;
 			this.dirty = false;
 			this.pending.clear();
+			this.everywhere = false;
 			return { events: [], paths: [] };
 		}
 
 		// SCOPED TO THE PENDING PATHS when we know them. A `changed` event naming one note must
 		// not make every consumer re-read everything, which is what an event carrying no paths
 		// amounts to. An empty pending set means the signal was batch-settled and told us
-		// nothing, so every path either side is in play.
+		// nothing, so every path either side is in play — and stays so until this rebuild, whatever
+		// paths arrived after it.
 		const scope =
-			this.pending.size > 0
+			!this.everywhere && this.pending.size > 0
 				? this.pending
 				: new Set<string>([...before.keys(), ...after.keys()]);
 
@@ -209,6 +230,7 @@ export class IndexHost {
 		this.sigs = after;
 		this.dirty = false;
 		this.pending.clear();
+		this.everywhere = false;
 		if (moved.length > 0) this.gen += 1;
 		return { events: [...events], paths: moved };
 	}

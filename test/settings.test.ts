@@ -1,13 +1,16 @@
 /**
  * The settings: reading data.json over the defaults, the create dialog's default note path, the
- * copy that names the folder, `References` over a configured folder, and the shell's default
- * model for a new map.
+ * copy that names the folder, `References` over a configured folder, the shell's default model
+ * for a new map, and the place-note keys as the tab reads and writes them.
  *
  * `obsidian` ships types only, so the module is stubbed (the shared stub, see obsidian-stub.ts)
  * before the plugin files are loaded.
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import type { App } from "obsidian";
 import { ApiController } from "../src/api/controller";
+import type { GebSettings, SettingsHost } from "../src/plugin/settings";
+import { NO_PLACE_KEYS, PLACE_KEY_ROLES } from "../src/query/types";
 import { COPY } from "../src/view/copy";
 import { MapShell } from "../src/view/shell";
 import { FakeVault } from "./fake-vault";
@@ -15,7 +18,7 @@ import { OBSIDIAN_STUB } from "./obsidian-stub";
 import { BYTES, ID, openShell, Recorder, seedVault } from "./shell-harness";
 
 void mock.module("obsidian", () => OBSIDIAN_STUB);
-const { coastlinePath, DEFAULT_SETTINGS, defaultNotePath, matchFolderCase, readSettings } = await import("../src/plugin/settings");
+const { coastlinePath, DEFAULT_SETTINGS, defaultNotePath, GebSettingTab, matchFolderCase, readSettings } = await import("../src/plugin/settings");
 const { References } = await import("../src/plugin/references");
 
 describe("folder guards", () => {
@@ -42,7 +45,7 @@ describe("readSettings", () => {
 	});
 
 	test("the defaults are the ones the tab promises", () => {
-		expect(DEFAULT_SETTINGS).toEqual({ referenceFolder: "Geb/reference", showReferenceByDefault: true, defaultModel: "tps", newNoteFolder: "" });
+		expect(DEFAULT_SETTINGS).toEqual({ referenceFolder: "Geb/reference", showReferenceByDefault: true, defaultModel: "tps", newNoteFolder: "", placeKeys: NO_PLACE_KEYS });
 	});
 
 	test("a partial file keeps what it has and defaults the rest", () => {
@@ -75,6 +78,88 @@ describe("readSettings", () => {
 		// The vault root would draw every GeoJSON file in the vault over every map.
 		expect(readSettings({ referenceFolder: "" }).referenceFolder).toBe("Geb/reference");
 		expect(readSettings({ referenceFolder: "/" }).referenceFolder).toBe("Geb/reference");
+	});
+
+	test("place-note keys are a list or one comma-separated string, trimmed, without blanks or repeats", () => {
+		expect(readSettings({ placeKeys: { lat: " y , breite,,y ", lng: ["x", " x ", "", 7] } }).placeKeys).toEqual({
+			...NO_PLACE_KEYS,
+			lat: ["y", "breite"],
+			lng: ["x"],
+		});
+	});
+
+	test("a place-note key that is a built-in key, or that an earlier role holds, is dropped", () => {
+		// `long` is already read as a longitude, and `y` already answers for latitude; neither may
+		// answer for a second role. Case is kept, so `Lat` is a property of its own.
+		expect(readSettings({ placeKeys: { lat: ["y", "lat", "Lat"], lng: ["long", "y", "x"], location: "location, geb-from" } }).placeKeys).toEqual({
+			...NO_PLACE_KEYS,
+			lat: ["y", "Lat"],
+			lng: ["x"],
+		});
+	});
+
+	test("place-note keys of the wrong type are the default", () => {
+		for (const placeKeys of [7, "y", ["y"], null]) expect(readSettings({ placeKeys }).placeKeys).toEqual(NO_PLACE_KEYS);
+		expect(readSettings({ placeKeys: { lat: 7, lng: { x: 1 }, crs: true } }).placeKeys).toEqual(NO_PLACE_KEYS);
+	});
+});
+
+/** The tab over a host that records its calls. The stubbed base class sets no `app`, so it is set here. */
+function tabOver(settings: GebSettings): { tab: InstanceType<typeof GebSettingTab>; host: SettingsHost; calls: string[] } {
+	const calls: string[] = [];
+	const host = {
+		settings,
+		saveSettings: () => {
+			calls.push("save");
+			return Promise.resolve();
+		},
+		referenceFolderChanged: () => calls.push("referenceFolderChanged"),
+		placeKeysChanged: () => calls.push("placeKeysChanged"),
+		offerCoastlineDownload: () => undefined,
+	} as unknown as SettingsHost;
+	const tab = new GebSettingTab({} as App, host);
+	tab.app = { vault: { configDir: "cfg" } } as unknown as App;
+	return { tab, host, calls };
+}
+
+describe("the place-note keys in the settings tab", () => {
+	test("each role is a text row whose value is its names joined with commas", () => {
+		const { tab } = tabOver({ ...DEFAULT_SETTINGS, placeKeys: { ...NO_PLACE_KEYS, lat: ["y", "breite"] } });
+		expect(tab.getControlValue("placeKeys.lat")).toBe("y, breite");
+		expect(tab.getControlValue("placeKeys.lng")).toBe("");
+		expect(tab.getControlValue("referenceFolder")).toBe(DEFAULT_SETTINGS.referenceFolder);
+	});
+
+	test("typing into a row stores the names and says the keys changed", async () => {
+		const { tab, host, calls } = tabOver(DEFAULT_SETTINGS);
+		await tab.setControlValue("placeKeys.lat", " y, breite ");
+		expect(host.settings.placeKeys).toEqual({ ...NO_PLACE_KEYS, lat: ["y", "breite"] });
+		expect(calls).toEqual(["save", "placeKeysChanged"]);
+	});
+
+	test("a change that leaves the names as they were, or another setting, does not say the keys changed", async () => {
+		const { tab, calls } = tabOver({ ...DEFAULT_SETTINGS, placeKeys: { ...NO_PLACE_KEYS, lat: ["y"] } });
+		// A trailing comma or space is the field mid-keystroke; the stored names are the same.
+		await tab.setControlValue("placeKeys.lat", "y, ");
+		await tab.setControlValue("defaultModel", "affine");
+		expect(calls).toEqual(["save", "save"]);
+	});
+
+	test("the row being typed into yields a name another role holds, so a keystroke cannot take it", async () => {
+		// Typing `xylo` for latitude passes through `x`. Under first-role-wins alone, that keystroke
+		// would move `x` from longitude to latitude, and finishing the word would not move it back.
+		const { tab, host } = tabOver({ ...DEFAULT_SETTINGS, placeKeys: { ...NO_PLACE_KEYS, lng: ["x"] } });
+		await tab.setControlValue("placeKeys.lat", "x");
+		await tab.setControlValue("placeKeys.lat", "xylo");
+		expect(host.settings.placeKeys).toEqual({ ...NO_PLACE_KEYS, lat: ["xylo"], lng: ["x"] });
+	});
+
+	test("every role has a row, under one heading", () => {
+		const { tab } = tabOver(DEFAULT_SETTINGS);
+		const group = tab.getSettingDefinitions().find((d) => "heading" in d && d.heading === COPY.settings.placeKeys.heading);
+		expect(group).toBeDefined();
+		const keys = (group as { items: { control: { key: string } }[] }).items.map((i) => i.control.key);
+		expect(keys).toEqual(PLACE_KEY_ROLES.map((r) => `placeKeys.${r}`));
 	});
 });
 

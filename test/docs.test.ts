@@ -170,7 +170,7 @@ describe("README.md cannot drift from the plugin", () => {
 
 	test("the settings, commands and doors it names are the ones the plugin shows", () => {
 		const s = COPY.settings;
-		for (const name of [s.referenceFolder.name, s.coastline.name, s.showReference.name, s.defaultModel.name, s.newNoteFolder.name]) expect(README).toContain(`**${name}.**`);
+		for (const name of [s.referenceFolder.name, s.coastline.name, s.showReference.name, s.defaultModel.name, s.newNoteFolder.name, s.placeKeys.heading]) expect(README).toContain(`**${name}.**`);
 		for (const name of [COPY.reference.download.command, COPY.doors.ribbon, COPY.doors.note, COPY.reference.button, COPY.report.button]) expect(README).toContain(`**${name}**`);
 	});
 });

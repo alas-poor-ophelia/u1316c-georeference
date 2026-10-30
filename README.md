@@ -67,6 +67,8 @@ geb-calendar: gregorian # optional; names the adapter that reads the two above
 ```
 <!-- /geb:readme-place-keys -->
 
+Notes written for another tool may use other names, `y` and `x` or `breite` and `länge`. Add them in settings under **Place note properties** and Geb reads them as well, each as another name for one of the keys above. For a coordinate, the built-in name is read first: where a note has both and they disagree, the built-in one is used and the disagreement is reported, and a `location` holding a place name gives way to your own pair. For `crs` and the `geb-` keys, the first name present is read and the others are not looked at, so a built-in one that does not validate is reported and yours is not consulted.
+
 A decimal comma is read (`51,5074`), and so is a `location` written as text. A `location` that could be either one number with a decimal comma or two coordinates is reported rather than guessed. A note with a coordinate problem is listed by the API's `listProblems`; a pin never vanishes silently. The view has no problems panel yet, so the list is reachable through the API or the developer console.
 
 ## Reading the fit
@@ -119,6 +121,7 @@ Put GeoJSON files in the vault folder `Geb/reference` (or the folder you choose 
 - **Show reference lines by default.** For a map whose toggle you have not touched.
 - **Default transform model.** What a new map starts with. A saved map keeps its own.
 - **Folder for new georeference notes.** Empty means beside the image.
+- **Place note properties.** Your own property names for each place-note key, separated by commas, such as `y, breite` for latitude. A name Geb already reads, or one you have given to another key, is ignored.
 
 ![The plugin's settings tab: reference folder, the coastline download button reading Downloaded, the show-reference-lines toggle, the default transform model dropdown, and the folder for new georeference notes](docs/images/settings.png)
 
