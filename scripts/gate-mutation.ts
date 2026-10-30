@@ -809,7 +809,14 @@ let caught = 0;
 
 for (const m of MUTANTS) {
 	const original = originals.get(m.file)!;
-	const hits = original.split(m.find).length - 1;
+	// The patterns are written with bare newlines, and a checkout under autocrlf carries carriage
+	// returns: measured 2026-10-30, every multi-line mutant matched 0 times while the one-line
+	// ones matched, so the gate had been red by line endings alone. Match and mutate in the
+	// file's own endings; the restore below writes the bytes exactly as they were read.
+	const eol = original.includes("\r\n") ? "\r\n" : "\n";
+	const find = m.find.replaceAll("\n", eol);
+	const replace = m.replace.replaceAll("\n", eol);
+	const hits = original.split(find).length - 1;
 	if (hits !== 1) {
 		// Not a survivor and not a catch: the mutant itself is broken, which is a gate failure
 		// because it means this file has drifted from the source it mutates.
@@ -818,7 +825,7 @@ for (const m of MUTANTS) {
 	}
 
 	try {
-		await Bun.write(m.file, original.replace(m.find, m.replace));
+		await Bun.write(m.file, original.replace(find, replace));
 		const r = await runSuite();
 		if (r.timedOut) timeouts.push(`${m.label} (${m.file})`);
 		else if (r.code === 0) survivors.push(`${m.label} (${m.file})`);

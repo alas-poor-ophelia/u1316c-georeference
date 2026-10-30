@@ -102,10 +102,24 @@
 	pointer-events: none;
 }
 
-/* The graticule is drawn in IMAGE pixels and scaled with the stage, so its stroke must be
-   scaled back or a zoomed-in map gets a stroke as thick as a road. The adapter sets each
-   stroke-width to 1/scale in image units; `vector-effect` is not relied on, because its handling
-   of a CSS transform on an HTML ancestor is not trusted across engines. */
+/* The overlay is drawn in IMAGE pixels and scaled with the stage, so every stroke must be scaled
+   back or a zoomed-in map gets a stroke as thick as a road. The view sets `--geb-inv` (1/scale)
+   on the stage; the strokes and the pin transforms read it, so a zoom changes one declaration
+   and not the overlay. `vector-effect` is not relied on, because its handling of a CSS transform
+   on an HTML ancestor is not trusted across engines. Scoped to the overlay: the legend reuses
+   these classes at a fixed size. */
+.geb-overlay .geb-graticule,
+.geb-overlay .geb-reference,
+.geb-overlay .geb-pin-uncertainty {
+	stroke-width: calc(1px * var(--geb-inv, 1));
+}
+
+.geb-overlay .geb-hull {
+	stroke-width: calc(1.5px * var(--geb-inv, 1));
+	/* A 6 px dash and a 4 px gap on screen, whatever the zoom. */
+	stroke-dasharray: calc(6px * var(--geb-inv, 1)) calc(4px * var(--geb-inv, 1));
+}
+
 .geb-graticule {
 	fill: none;
 	stroke: var(--text-accent);
@@ -141,8 +155,7 @@
 	stroke-dasharray: 2 2;
 }
 
-/* The control-point hull: the area where the fit is trusted. Stroke width and dashes are set by
-   the adapter in image units, as for the graticule. */
+/* The control-point hull: the area where the fit is trusted. */
 .geb-hull {
 	fill: none;
 	stroke: var(--text-accent);
@@ -154,7 +167,6 @@
 	fill-opacity: 0.12;
 	stroke: var(--interactive-accent);
 	stroke-opacity: 0.4;
-	/* stroke-width is set by the adapter in image units, as for the graticule. */
 }
 
 .geb-pin-label {
@@ -167,7 +179,7 @@
 }
 
 /* Pins and labels keep a constant SCREEN size: they are positioned in image pixels but must not
-   grow into blobs at high zoom, so the shell counter-scales each pin group. */
+   grow into blobs at high zoom, so the view counter-scales each pin group by `--geb-inv`. */
 
 .geb-readout {
 	position: absolute;

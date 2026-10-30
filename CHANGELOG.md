@@ -4,6 +4,8 @@
 
 **Place note properties.** Your own frontmatter property names can be read as place-note keys, any number per key, from a new section in settings: `y` for latitude, `coords` for a location pair, `born` for `geb-from`. They are read after Geb's built-in names, and a problem with one names the property you wrote.
 
+**Smoother zoom on large images.** A wheel notch used to rebuild every pin, label and line in the overlay, and each pointer event forced the browser to restyle it again; on a large map that was the lag. The overlay is now built once and scaled by one property, and the pointer is localised once per frame.
+
 ## 0.1.0 (beta)
 
 The first release.

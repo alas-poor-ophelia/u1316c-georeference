@@ -74,9 +74,6 @@ const CP_HALF = 5;
 /** Wheel `deltaMode` 1 (lines) and 2 (pages) scaled to pixels, so a notch means the same everywhere. */
 const DELTA_LINE_PX = 16;
 const DELTA_PAGE_PX = 400;
-/** The hull's dash and gap, in CSS pixels; scaled into image units like the hairline. */
-const HULL_DASH = 6;
-const HULL_GAP = 4;
 /** Long enough to reach Undo after reading the notice, short enough not to linger. */
 const UNDO_NOTICE_MS = 8000;
 const EDIT_TIP = "Edit the control points";
@@ -90,7 +87,6 @@ interface Painted {
 	reference: Frame["reference"];
 	referenceVisible: boolean;
 	edit: Frame["edit"];
-	scale: number;
 	viewport: Frame["viewport"];
 }
 
@@ -111,6 +107,8 @@ export class GeorefView extends ItemView implements Surface {
 	private statusEl: HTMLElement | null = null;
 	private messageEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
+	/** The viewport's rectangle for the current animation frame; see `wirePointer`. */
+	private viewportRect: DOMRect | null = null;
 	private buttons: HTMLButtonElement[] = [];
 	private editBtn: HTMLButtonElement | null = null;
 	private referenceBtn: HTMLButtonElement | null = null;
@@ -228,6 +226,7 @@ export class GeorefView extends ItemView implements Surface {
 		this.shell = null;
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
+		this.viewportRect = null;
 		this.painted = null;
 		this.lastFrame = null;
 		this.viewportEl = null;
@@ -356,7 +355,10 @@ export class GeorefView extends ItemView implements Surface {
 		// scale 0.06, and nothing refitted it — a map the size of a postage stamp in the corner,
 		// which is the stage-B defect in a new coat. The shell's `resize` refits only until the
 		// user has taken the viewport somewhere, so observing is safe at every moment after.
-		this.resizeObserver = new ResizeObserver(() => this.shell?.resize());
+		this.resizeObserver = new ResizeObserver(() => {
+			this.viewportRect = null;
+			this.shell?.resize();
+		});
 		this.resizeObserver.observe(vp);
 
 		this.wirePointer(vp);
@@ -427,9 +429,19 @@ export class GeorefView extends ItemView implements Surface {
 		let dragged = false;
 		let grabbed: number | null = null;
 
+		// The viewport's rectangle is measured once per animation frame, not once per event.
+		// Measuring forces the browser to restyle whatever the last paint changed, and after a
+		// zoom that is every stroke and pin in the overlay: measured live, a wheel notch cost
+		// 4.5 ms with the measurement and nothing without it. Left alone, the browser restyles
+		// once per frame. A resize drops the cache too, so a leaf that moved is measured afresh.
 		const local = (e: PointerEvent | WheelEvent): Pixel => {
-			const r = vp.getBoundingClientRect();
-			return { x: e.clientX - r.left, y: e.clientY - r.top };
+			let rect = this.viewportRect;
+			if (rect === null) {
+				rect = vp.getBoundingClientRect();
+				this.viewportRect = rect;
+				vp.win.requestAnimationFrame(() => (this.viewportRect = null));
+			}
+			return { x: e.clientX - rect.left, y: e.clientY - rect.top };
 		};
 		const radius = (e: PointerEvent): number => (e.pointerType === "mouse" ? PIN_HIT_RADIUS_CSS : PIN_HIT_RADIUS_TOUCH_CSS);
 		const reset = (): void => {
@@ -441,8 +453,12 @@ export class GeorefView extends ItemView implements Surface {
 			vp.removeClass("geb-dragging");
 		};
 
+		// A gesture starts from a fresh measurement: the cache serves the events inside one, and
+		// a rect cached in a window that closed before its animation frame must not outlive it.
+		this.registerDomEvent(vp, "pointerenter", () => (this.viewportRect = null));
 		this.registerDomEvent(vp, "pointerdown", (e) => {
 			if (e.button !== 0 || active !== null) return;
+			this.viewportRect = null;
 			active = e.pointerId;
 			pressed = local(e);
 			last = pressed;
@@ -625,9 +641,10 @@ export class GeorefView extends ItemView implements Surface {
 		// The readout and status are cheap and always set. The transform is set when the viewport
 		// moved. The overlay is REBUILT only when its geometry did — the shell hands back the same
 		// `pins`, `lines` and `controlPoints` arrays until something changes, so reference equality
-		// is the whole test — or when the SCALE changed, because pins and labels are counter-scaled
-		// by it. A pan alone moves the stage and touches nothing inside it: the first version
-		// compared the whole viewport and rebuilt every pin on every pixel of a drag.
+		// is the whole test. A pan or a zoom alone moves the stage and touches nothing inside it:
+		// the first version compared the whole viewport and rebuilt every pin on every pixel of a
+		// drag, and the second rebuilt the whole overlay on every wheel notch because the pins are
+		// counter-scaled by the zoom. The counter-scale is now one custom property on the stage.
 		const prev = this.painted;
 		const { width, height } = frame.image;
 		const { scale, offsetX, offsetY } = frame.viewport;
@@ -641,8 +658,7 @@ export class GeorefView extends ItemView implements Surface {
 			prev.src !== frame.image.src ||
 			prev.pins !== frame.pins ||
 			prev.lines !== frame.lines ||
-			prev.hull !== frame.hull ||
-			prev.scale !== scale;
+			prev.hull !== frame.hull;
 		const viewportChanged = prev === null || prev.viewport !== frame.viewport;
 		// The toggle lives in the layout too; a flip is worth a save.
 		const visibilityChanged = this.referenceVisible !== frame.referenceVisible;
@@ -657,7 +673,6 @@ export class GeorefView extends ItemView implements Surface {
 			reference: frame.reference,
 			referenceVisible: frame.referenceVisible,
 			edit: frame.edit,
-			scale,
 			viewport: frame.viewport,
 		};
 		this.lastFrame = frame;
@@ -670,6 +685,16 @@ export class GeorefView extends ItemView implements Surface {
 				height: `${height}px`,
 				transform: `translate(${offsetX}px, ${offsetY}px) scale(${scale})`,
 			});
+		}
+		if (prev === null || prev.viewport.scale !== scale) {
+			// Strokes, pins and labels are drawn in image pixels and scaled with the stage — at 32x
+			// a hairline is a road and a pin a blob — so each is scaled back by this. ONE property
+			// read by every stroke width and pin transform in the stylesheet, so a zoom changes a
+			// declaration and not the DOM; and only a zoom, because the browser restyles every
+			// reader of the property when it changes, and a pan must not pay for that. `vector-effect`
+			// is not trusted to see a CSS transform on an HTML ancestor, so the widths are set
+			// explicitly in image units.
+			stage.setCssProps({ "--geb-inv": String(1 / scale) });
 		}
 		this.readoutEl?.setText(frame.readout);
 		this.statusEl?.setText(frame.status);
@@ -693,22 +718,20 @@ export class GeorefView extends ItemView implements Surface {
 		svg.setAttribute("width", String(width));
 		svg.setAttribute("height", String(height));
 		svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-		// Strokes drawn in image pixels would scale with the stage — at 32x a hairline is a road.
-		// `vector-effect` is not trusted to see a CSS transform on an HTML ancestor, so the width
-		// is set explicitly in image units to come out as one screen pixel.
-		const hairline = String(1 / scale);
+		// Positioned in image pixels and counter-scaled by the stage's property, so a label or a
+		// pin is nailed to its pixel but drawn at a constant screen size. A CSS transform, not the
+		// SVG attribute, because only CSS can read the property.
+		const nailed = (x: number, y: number): string => `translate(${x}px, ${y}px) scale(var(--geb-inv, 1))`;
 
 		svg.empty();
 		// Graticule first, under the pins.
 		for (const line of frame.lines) {
 			const path = svg.createSvg("polyline", { cls: "geb-graticule" });
 			path.setAttribute("points", line.points.map((p) => `${p.x},${p.y}`).join(" "));
-			path.setAttribute("stroke-width", hairline);
 			const first = line.points[0];
 			if (line.label !== "" && first !== undefined) {
 				const text = svg.createSvg("text", { cls: "geb-graticule-label" });
-				// Counter-scaled so the label stays readable at every zoom.
-				text.setAttribute("transform", `translate(${first.x} ${first.y}) scale(${1 / scale})`);
+				text.setCssStyles({ transform: nailed(first.x, first.y) });
 				text.setAttribute("dx", "3");
 				text.setAttribute("dy", "-3");
 				text.textContent = line.label;
@@ -719,16 +742,13 @@ export class GeorefView extends ItemView implements Surface {
 			for (const line of frame.reference) {
 				const path = svg.createSvg("polyline", { cls: "geb-reference" });
 				path.setAttribute("points", line.points.map((p) => `${p.x},${p.y}`).join(" "));
-				path.setAttribute("stroke-width", hairline);
 			}
 		}
 		// The trusted area, over the graticule and under every pin and marker. In image pixels
-		// like the graticule, so its stroke and its dashes are scaled back to screen size.
+		// like the graticule; the stylesheet scales its stroke and its dashes back to screen size.
 		if (frame.hull.length > 0) {
 			const hull = svg.createSvg("polygon", { cls: "geb-hull" });
 			hull.setAttribute("points", frame.hull.map((p) => `${p.x},${p.y}`).join(" "));
-			hull.setAttribute("stroke-width", String(1.5 / scale));
-			hull.setAttribute("stroke-dasharray", `${HULL_DASH / scale} ${HULL_GAP / scale}`);
 		}
 		for (const pin of frame.pins) {
 			if (pin.uncertaintyPx !== null) {
@@ -736,15 +756,12 @@ export class GeorefView extends ItemView implements Surface {
 				ring.setAttribute("cx", String(pin.x));
 				ring.setAttribute("cy", String(pin.y));
 				ring.setAttribute("r", String(pin.uncertaintyPx));
-				ring.setAttribute("stroke-width", hairline);
 			}
 		}
 		for (const pin of frame.pins) {
-			// The dot and label are positioned in image pixels and counter-scaled, so a pin is
-			// nailed to its pixel but drawn at a constant screen size. Dots after every ring, so
-			// no ring's fill covers a neighbour's dot.
+			// Dots after every ring, so no ring's fill covers a neighbour's dot.
 			const g = svg.createSvg("g");
-			g.setAttribute("transform", `translate(${pin.x} ${pin.y}) scale(${1 / scale})`);
+			g.setCssStyles({ transform: nailed(pin.x, pin.y) });
 			// `classList.add`, not `cls`: the SVG factory's `cls` refuses a token with a space in it
 			// (measured live, as an InvalidCharacterError that left the point dialog open).
 			const dot = g.createSvg("circle");
@@ -759,7 +776,7 @@ export class GeorefView extends ItemView implements Surface {
 		// Control points last, over everything: while editing they are what the user is working on.
 		for (const cp of frame.controlPoints) {
 			const g = svg.createSvg("g");
-			g.setAttribute("transform", `translate(${cp.x} ${cp.y}) scale(${1 / scale})`);
+			g.setCssStyles({ transform: nailed(cp.x, cp.y) });
 			const mark = g.createSvg("rect");
 			mark.classList.add("geb-cp");
 			if (cp.selected) mark.classList.add("geb-cp-selected");
