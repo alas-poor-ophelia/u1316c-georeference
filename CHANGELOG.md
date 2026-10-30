@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 (beta)
 
 **Place note properties.** Your own frontmatter property names can be read as place-note keys, any number per key, from a new section in settings: `y` for latitude, `coords` for a location pair, `born` for `geb-from`. They are read after Geb's built-in names, and a problem with one names the property you wrote.
 

@@ -1,6 +1,6 @@
 {
   "name": "geb",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Georeference a map image in Obsidian: pin notes by latitude and longitude",
   "private": true,
   "type": "module",
